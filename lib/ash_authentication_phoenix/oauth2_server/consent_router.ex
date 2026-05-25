@@ -57,11 +57,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   defp handle_get(conn, server, opts) do
     conn = fetch_query_params(conn)
     params = conn.query_params
+    tenant_opts = tenant_opts(conn)
 
     with :ok <- check_state_size(params),
-         {:ok, validated} <- Authorize.validate_request(server, params),
+         {:ok, validated} <- Authorize.validate_request(server, params, tenant_opts),
          {:ok, user} <- require_user(conn) do
-      if Authorize.consented?(server, user, validated.client, validated.scope) do
+      if Authorize.consented?(server, user, validated.client, validated.scope, tenant_opts) do
         issue_code_redirect(conn, server, user, validated)
       else
         render_consent(conn, validated, opts)
@@ -96,11 +97,13 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   end
 
   defp handle_post_authorized(conn, server, raw_params, params) do
-    with {:ok, validated} <- Authorize.validate_request(server, params),
+    tenant_opts = tenant_opts(conn)
+
+    with {:ok, validated} <- Authorize.validate_request(server, params, tenant_opts),
          {:ok, user} <- require_user(conn) do
       case Map.get(raw_params, "action") do
         "approve" ->
-          Authorize.grant_consent!(server, user, validated.client, validated.scope)
+          Authorize.grant_consent!(server, user, validated.client, validated.scope, tenant_opts)
 
           conn
           |> rotate_session()
@@ -138,7 +141,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   end
 
   defp issue_code_redirect(conn, server, user, validated) do
-    code = Authorize.issue_code!(server, user, validated)
+    code = Authorize.issue_code!(server, user, validated, tenant_opts(conn))
 
     location =
       validated.redirect_uri <>
@@ -158,7 +161,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   # error response since redirecting an unverified URI is the worse failure
   # mode (open-redirect / token leak).
   defp handle_authorize_error(conn, server, params, code, desc) do
-    case safe_redirect_uri(server, params) do
+    case safe_redirect_uri(server, params, conn) do
       {:ok, redirect_uri} ->
         redirect_with_oauth_error(conn, redirect_uri, Map.get(params, "state"), code, desc)
 
@@ -183,9 +186,13 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   defp maybe_put_param(map, _key, ""), do: map
   defp maybe_put_param(map, key, value), do: Map.put(map, key, value)
 
-  defp safe_redirect_uri(server, %{"client_id" => client_id, "redirect_uri" => uri})
+  defp safe_redirect_uri(server, %{"client_id" => client_id, "redirect_uri" => uri}, conn)
        when is_binary(client_id) and is_binary(uri) and client_id != "" and uri != "" do
-    with {:ok, client} <- Ash.get(server.client_resource(), client_id, authorize?: false),
+    opts =
+      [context: %{private: %{ash_authentication?: true}}]
+      |> Keyword.merge(tenant_opts(conn))
+
+    with {:ok, client} <- Ash.get(server.client_resource(), client_id, opts),
          registered when is_list(registered) <- Map.get(client, :redirect_uris) do
       normalized = Oauth2Server.__normalize_url__(uri)
       registered_normalized = Enum.map(registered, &Oauth2Server.__normalize_url__/1)
@@ -195,7 +202,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     end
   end
 
-  defp safe_redirect_uri(_server, _params), do: :error
+  defp safe_redirect_uri(_server, _params, _conn), do: :error
+
+  defp tenant_opts(conn) do
+    case Ash.PlugHelpers.get_tenant(conn) do
+      nil -> []
+      tenant -> [tenant: tenant]
+    end
+  end
 
   defp check_state_size(%{"state" => state}) when is_binary(state) do
     if byte_size(state) > @max_state_bytes, do: {:error, :state_too_large}, else: :ok

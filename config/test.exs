@@ -5,7 +5,7 @@
 import Config
 
 config :ash_authentication_oauth2_server,
-  ash_domains: [Oauth2ServerTest.Domain]
+  ash_domains: [Oauth2ServerTest.Domain, Oauth2ServerTest.TenantedDomain]
 
 config :ash, :validate_domain_config_inclusion?, false
 config :ash, :validate_domain_resource_inclusion?, false

@@ -15,12 +15,22 @@ defmodule AshAuthentication.Oauth2Server.Token do
       entire descendant chain.
 
   All functions return tagged tuples; controllers translate them to HTTP.
+
+  ## Authorization & tenancy
+
+  All Ash calls run through the `AshAuthentication.Checks.AshAuthenticationInteraction`
+  bypass (set by the installer) rather than `authorize?: false`. Every public
+  function accepts an `opts` keyword that may include `:tenant`; when set, it's
+  threaded to every action and baked into the minted token as a `"tenant"`
+  claim so the resource server can restore it on subsequent requests.
   """
 
   require Ash.Query
   require Logger
 
   alias AshAuthentication.Oauth2Server.{Jwt, PKCE}
+
+  @ash_context %{private: %{ash_authentication?: true}}
 
   @typedoc "Result of a successful grant — the bundle returned to the client."
   @type token_response :: %{
@@ -31,6 +41,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
           scope: String.t()
         }
 
+  @typedoc "Options shared across this module's public functions."
+  @type opts :: [tenant: any()]
+
   # ── authorization_code grant ───────────────────────────────────────────────
 
   @doc """
@@ -38,11 +51,13 @@ defmodule AshAuthentication.Oauth2Server.Token do
   token pair. Consumes the code atomically; a second call with the same code
   returns `{:error, :reuse}`.
   """
-  @spec exchange_authorization_code(server :: module(), params :: map()) ::
+  @spec exchange_authorization_code(server :: module(), params :: map(), opts()) ::
           {:ok, token_response()}
           | {:error, atom()}
-  def exchange_authorization_code(server, params) do
-    with {:ok, code, client} <- consume_code(server, params),
+  def exchange_authorization_code(server, params, opts \\ []) do
+    tenant = Keyword.get(opts, :tenant)
+
+    with {:ok, code, client} <- consume_code(server, params, opts),
          :ok <- verify_pkce(code, params),
          :ok <- check_resource_match(server, params, code),
          :ok <- check_redirect_match(params, code),
@@ -50,10 +65,11 @@ defmodule AshAuthentication.Oauth2Server.Token do
            Jwt.mint(server,
              sub: code.user_id,
              client_id: client.id,
-             scope: code.scope
+             scope: code.scope,
+             tenant: tenant
            ),
-         {:ok, refresh_token} <- issue_refresh_token(server, client.id, code) do
-      touch_client(client)
+         {:ok, refresh_token} <- issue_refresh_token(server, client.id, code, opts) do
+      touch_client(client, opts)
 
       {:ok,
        %{
@@ -66,11 +82,11 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  defp consume_code(server, %{"code" => code_id, "client_id" => client_id})
+  defp consume_code(server, %{"code" => code_id, "client_id" => client_id}, opts)
        when is_binary(code_id) and is_binary(client_id) do
     with {:ok, code} <-
            code_or_error(
-             Ash.get(server.authorization_code_resource(), code_id, authorize?: false)
+             Ash.get(server.authorization_code_resource(), code_id, ash_opts(opts))
            ),
          :ok <- check_client_match(code, client_id),
          :ok <- check_not_consumed(code),
@@ -78,15 +94,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
          {:ok, code} <-
            code
            |> Ash.Changeset.for_update(:consume, %{})
-           |> Ash.update(authorize?: false)
+           |> Ash.update(ash_opts(opts))
            |> code_or_error(),
          {:ok, client} <-
-           code_or_error(Ash.get(server.client_resource(), code.client_id, authorize?: false)) do
+           code_or_error(Ash.get(server.client_resource(), code.client_id, ash_opts(opts))) do
       {:ok, code, client}
     end
   end
 
-  defp consume_code(_, _), do: {:error, :invalid_request}
+  defp consume_code(_, _, _), do: {:error, :invalid_request}
 
   defp code_or_error({:ok, _} = ok), do: ok
   defp code_or_error({:error, _}), do: {:error, :invalid_code}
@@ -154,9 +170,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
   (race lost, invalid token, expired, etc.) we do a follow-up read to
   distinguish `:reuse` from the other failure modes.
   """
-  @spec exchange_refresh_token(server :: module(), params :: map()) ::
+  @spec exchange_refresh_token(server :: module(), params :: map(), opts()) ::
           {:ok, token_response()} | {:error, atom()}
-  def exchange_refresh_token(server, %{"refresh_token" => raw, "client_id" => client_id} = params)
+  def exchange_refresh_token(server, params, opts \\ [])
+
+  def exchange_refresh_token(
+        server,
+        %{"refresh_token" => raw, "client_id" => client_id} = params,
+        opts
+      )
       when is_binary(raw) do
     hash = hash_refresh(raw)
     resource = Map.get(params, "resource")
@@ -168,14 +190,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
     {new_raw, new_hash} = generate_refresh()
     new_id = Ash.UUIDv7.generate()
 
-    case atomic_rotate(server, hash, client_id, resource, expected_resource, new_id) do
+    case atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
       {:ok, old_row} ->
-        complete_rotation(server, old_row, new_id, new_hash, new_raw)
+        complete_rotation(server, old_row, new_id, new_hash, new_raw, opts)
 
       :no_match ->
-        case disambiguate_failure(server, hash, client_id, expected_resource, resource) do
+        case disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
           :reuse ->
-            revoke_chain(server, hash)
+            revoke_chain(server, hash, opts)
             {:error, :reuse}
 
           other ->
@@ -193,7 +215,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  def exchange_refresh_token(_, _), do: {:error, :invalid_request}
+  def exchange_refresh_token(_, _, _), do: {:error, :invalid_request}
 
   # The bulk update's filter holds every "is this refresh usable" check
   # in one place — client/resource/expiry/rotation/revocation — so the
@@ -207,14 +229,18 @@ defmodule AshAuthentication.Oauth2Server.Token do
   #   * `{:bulk_error, errors}` — the bulk update itself failed for a
   #     real reason (validation, constraint, etc.). The caller logs
   #     and returns a generic invalid_refresh without disambiguating.
-  defp atomic_rotate(server, hash, client_id, resource, expected_resource, new_id) do
+  defp atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
     if requested_resource_ok?(resource, expected_resource),
-      do: do_atomic_rotate(server, hash, client_id, expected_resource, new_id),
+      do: do_atomic_rotate(server, hash, client_id, expected_resource, new_id, opts),
       else: :no_match
   end
 
-  defp do_atomic_rotate(server, hash, client_id, expected_resource, new_id) do
+  defp do_atomic_rotate(server, hash, client_id, expected_resource, new_id, opts) do
     now = DateTime.utc_now()
+
+    bulk_opts =
+      [return_records?: true, return_errors?: true]
+      |> Keyword.merge(ash_opts(opts))
 
     server.refresh_token_resource()
     |> Ash.Query.filter(
@@ -225,11 +251,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
         is_nil(rotated_to_id) and
         is_nil(revoked_at)
     )
-    |> Ash.bulk_update(:rotate, %{rotated_to_id: new_id},
-      return_records?: true,
-      return_errors?: true,
-      authorize?: false
-    )
+    |> Ash.bulk_update(:rotate, %{rotated_to_id: new_id}, bulk_opts)
     |> case do
       %Ash.BulkResult{status: :success, records: [old_row | _]} -> {:ok, old_row}
       %Ash.BulkResult{status: :success} -> :no_match
@@ -237,7 +259,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  defp complete_rotation(server, old_row, new_id, new_hash, new_raw) do
+  defp complete_rotation(server, old_row, new_id, new_hash, new_raw, opts) do
+    tenant = Keyword.get(opts, :tenant)
+
     new_expires_at =
       DateTime.add(DateTime.utc_now(), server.refresh_token_lifetime(), :second)
 
@@ -252,14 +276,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
              resource_uri: old_row.resource_uri,
              expires_at: new_expires_at
            })
-           |> Ash.create(authorize?: false),
+           |> Ash.create(ash_opts(opts)),
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
              sub: old_row.user_id,
              client_id: old_row.client_id,
-             scope: old_row.scope
+             scope: old_row.scope,
+             tenant: tenant
            ) do
-      touch_client_by_id(server, old_row.client_id)
+      touch_client_by_id(server, old_row.client_id, opts)
 
       {:ok,
        %{
@@ -277,8 +302,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # the chain-revoke decision (only `:reuse` triggers revocation).
   # We could do this with errors on the bulk_update's filter instead
   # but not all data layers support that
-  defp disambiguate_failure(server, hash, client_id, expected_resource, resource) do
-    case find_refresh(server, hash) do
+  defp disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
+    case find_refresh(server, hash, opts) do
       {:ok, row} -> classify_row(row, client_id, expected_resource, resource)
       {:error, _} -> :invalid_refresh
     end
@@ -313,13 +338,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
     * `"token_type_hint"` (optional) — `"refresh_token"` or `"access_token"`.
       Treated as a hint only; access-token revocation is a silent no-op.
   """
-  @spec revoke(server :: module(), params :: map()) :: :ok
-  def revoke(server, %{"token" => raw, "client_id" => client_id})
+  @spec revoke(server :: module(), params :: map(), opts()) :: :ok
+  def revoke(server, params, opts \\ [])
+
+  def revoke(server, %{"token" => raw, "client_id" => client_id}, opts)
       when is_binary(raw) and raw != "" and is_binary(client_id) and client_id != "" do
     hash = hash_refresh(raw)
 
-    case find_refresh(server, hash) do
-      {:ok, %{client_id: ^client_id} = row} -> revoke_descendants(server, row)
+    case find_refresh(server, hash, opts) do
+      {:ok, %{client_id: ^client_id} = row} -> revoke_descendants(server, row, opts)
       _ -> :ok
     end
 
@@ -328,12 +355,12 @@ defmodule AshAuthentication.Oauth2Server.Token do
     _ -> :ok
   end
 
-  def revoke(_server, _params), do: :ok
+  def revoke(_server, _params, _opts), do: :ok
 
-  defp find_refresh(server, hash) do
+  defp find_refresh(server, hash, opts) do
     server.refresh_token_resource()
     |> Ash.Query.filter(token_hash == ^hash)
-    |> Ash.read_one(authorize?: false)
+    |> Ash.read_one(ash_opts(opts))
     |> case do
       {:ok, nil} -> {:error, :invalid_refresh}
       {:ok, row} -> {:ok, row}
@@ -355,10 +382,10 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   # On reuse detection, walk forward through `rotated_to_id` revoking every
   # descendant of the offending token. RFC 6749 §4.3.1.
-  defp revoke_chain(server, hash) do
-    case find_refresh(server, hash) do
+  defp revoke_chain(server, hash, opts) do
+    case find_refresh(server, hash, opts) do
       {:ok, row} ->
-        revoke_descendants(server, row)
+        revoke_descendants(server, row, opts)
 
       _ ->
         Logger.warning(
@@ -369,8 +396,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  defp revoke_descendants(server, row) do
-    case row |> Ash.Changeset.for_update(:revoke, %{}) |> Ash.update(authorize?: false) do
+  defp revoke_descendants(server, row, opts) do
+    case row |> Ash.Changeset.for_update(:revoke, %{}) |> Ash.update(ash_opts(opts)) do
       {:ok, _} ->
         :ok
 
@@ -381,8 +408,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
 
     if row.rotated_to_id do
-      case Ash.get(server.refresh_token_resource(), row.rotated_to_id, authorize?: false) do
-        {:ok, next} -> revoke_descendants(server, next)
+      case Ash.get(server.refresh_token_resource(), row.rotated_to_id, ash_opts(opts)) do
+        {:ok, next} -> revoke_descendants(server, next, opts)
         _ -> :ok
       end
     else
@@ -392,7 +419,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   # ── refresh issuance helpers ───────────────────────────────────────────────
 
-  defp issue_refresh_token(server, client_id, code) do
+  defp issue_refresh_token(server, client_id, code, opts) do
     {raw, hash} = generate_refresh()
     expires_at = DateTime.add(DateTime.utc_now(), server.refresh_token_lifetime(), :second)
 
@@ -405,7 +432,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
       resource_uri: code.resource_uri,
       expires_at: expires_at
     })
-    |> Ash.create(authorize?: false)
+    |> Ash.create(ash_opts(opts))
     |> case do
       {:ok, _} -> {:ok, raw}
       {:error, _} -> {:error, :refresh_create_failed}
@@ -423,18 +450,31 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   # ── client touch (best-effort) ────────────────────────────────────────────
 
-  defp touch_client(client) do
+  defp touch_client(client, opts) do
     client
     |> Ash.Changeset.for_update(:touch, %{})
-    |> Ash.update(authorize?: false)
+    |> Ash.update(ash_opts(opts))
   rescue
     _ -> :ok
   end
 
-  defp touch_client_by_id(server, client_id) do
-    case Ash.get(server.client_resource(), client_id, authorize?: false) do
-      {:ok, client} -> touch_client(client)
+  defp touch_client_by_id(server, client_id, opts) do
+    case Ash.get(server.client_resource(), client_id, ash_opts(opts)) do
+      {:ok, client} -> touch_client(client, opts)
       _ -> :ok
+    end
+  end
+
+  # ── opts helper ───────────────────────────────────────────────────────────
+
+  # Bypass context + tenant (when provided). Used for every Ash call in
+  # this module.
+  defp ash_opts(opts) do
+    base = [context: @ash_context]
+
+    case Keyword.get(opts, :tenant) do
+      nil -> base
+      tenant -> Keyword.put(base, :tenant, tenant)
     end
   end
 end

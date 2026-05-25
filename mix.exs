@@ -69,7 +69,11 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       source_ref: "v#{@version}",
       extra_section: "GUIDES",
       extras: [
-        {"README.md", title: "Home"}
+        {"README.md", title: "Home"},
+        "documentation/topics/scopes.md"
+      ],
+      groups_for_extras: [
+        Topics: ~r'documentation/topics'
       ],
       before_closing_head_tag: fn type ->
         if type == :html do

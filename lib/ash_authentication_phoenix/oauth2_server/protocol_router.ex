@@ -58,7 +58,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
 
   post "/register" do
     server = server!(conn.assigns.oauth2_server_router_opts)
-    opts = [initial_access_token: extract_bearer(conn)]
+    opts = [initial_access_token: extract_bearer(conn)] ++ tenant_opts(conn)
 
     case Register.register(server, conn.params, opts) do
       {:ok, _client, body} ->
@@ -92,11 +92,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   post "/token" do
     server = server!(conn.assigns.oauth2_server_router_opts)
     params = conn.params || %{}
+    opts = tenant_opts(conn)
 
     result =
       case Map.get(params, "grant_type") do
-        "authorization_code" -> Token.exchange_authorization_code(server, params)
-        "refresh_token" -> Token.exchange_refresh_token(server, params)
+        "authorization_code" -> Token.exchange_authorization_code(server, params, opts)
+        "refresh_token" -> Token.exchange_refresh_token(server, params, opts)
         _ -> {:error, :unsupported_grant_type}
       end
 
@@ -123,7 +124,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   # — RFC 7009 §2.2 requires the endpoint not to leak token state.
   post "/revoke" do
     server = server!(conn.assigns.oauth2_server_router_opts)
-    :ok = Token.revoke(server, conn.params || %{})
+    :ok = Token.revoke(server, conn.params || %{}, tenant_opts(conn))
 
     conn
     |> put_resp_header("cache-control", "no-store")
@@ -140,6 +141,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   # ── helpers ───────────────────────────────────────────────────────────────
 
   defp server!(opts), do: Keyword.fetch!(opts, :oauth2_server)
+
+  # Read the Ash tenant set upstream (browser plug, header parser, etc.)
+  # and forward it to the protocol-core functions. Returns `[]` for
+  # single-tenant deployments so the caller can splice without an `if`.
+  defp tenant_opts(conn) do
+    case Ash.PlugHelpers.get_tenant(conn) do
+      nil -> []
+      tenant -> [tenant: tenant]
+    end
+  end
 
   # Pull the bearer token out of `Authorization: Bearer <token>` if
   # present. Used by `/register` to forward an RFC 7591 initial access

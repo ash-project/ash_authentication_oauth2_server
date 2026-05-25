@@ -14,7 +14,12 @@ defmodule AshAuthentication.Oauth2Server.Register do
   it, set `:initial_access_token` on your `Oauth2Server` module and pass
   the request's bearer token via `opts[:initial_access_token]` when
   calling `register/3` (RFC 7591 §3).
+
+  All Ash calls run through the `AshAuthentication.Checks.AshAuthenticationInteraction`
+  bypass (set by the installer) rather than `authorize?: false`.
   """
+
+  @ash_context %{private: %{ash_authentication?: true}}
 
   @valid_grant_types ~w(authorization_code refresh_token)
   @valid_response_types ~w(code)
@@ -28,6 +33,8 @@ defmodule AshAuthentication.Oauth2Server.Register do
     * `:initial_access_token` — the bearer token the request presented
       (or `nil`). When the server has `:initial_access_token` configured,
       this MUST match (constant-time) or registration is rejected.
+    * `:tenant` — Ash tenant for the create call. Forwarded as-is so
+      multi-tenant client resources scope correctly.
 
   Returns:
 
@@ -55,7 +62,7 @@ defmodule AshAuthentication.Oauth2Server.Register do
          :ok <- validate_grant_types(params),
          :ok <- validate_response_types(params),
          :ok <- validate_auth_method(params),
-         {:ok, client} <- create_client(server, params) do
+         {:ok, client} <- create_client(server, params, opts) do
       {:ok, client, response_body(server, client)}
     else
       {:error, :dcr_disabled} = err -> err
@@ -139,7 +146,7 @@ defmodule AshAuthentication.Oauth2Server.Register do
 
   defp validate_auth_method(_), do: :ok
 
-  defp create_client(server, params) do
+  defp create_client(server, params, opts) do
     attrs = %{
       client_name: Map.get(params, "client_name", "Unnamed Client"),
       redirect_uris: Map.fetch!(params, "redirect_uris"),
@@ -151,7 +158,16 @@ defmodule AshAuthentication.Oauth2Server.Register do
 
     server.client_resource()
     |> Ash.Changeset.for_create(:register, attrs)
-    |> Ash.create(authorize?: false)
+    |> Ash.create(ash_opts(opts))
+  end
+
+  defp ash_opts(opts) do
+    base = [context: @ash_context]
+
+    case Keyword.get(opts, :tenant) do
+      nil -> base
+      tenant -> Keyword.put(base, :tenant, tenant)
+    end
   end
 
   defp response_body(server, client) do

@@ -335,3 +335,263 @@ defmodule Oauth2ServerTest.DynamicScopesServer do
     scopes: {Oauth2ServerTest.ScopeProvider, :list_scopes, []},
     dcr_enabled?: true
 end
+
+# ── Tenant-aware fixtures ────────────────────────────────────────────────
+#
+# All five resources opt into attribute-based multitenancy on `:org_id`.
+# Used by the multitenancy test to confirm tenants are threaded through
+# every protocol-core call, baked into the access token, and restored
+# from the JWT on the resource side.
+
+defmodule Oauth2ServerTest.TenantedUser do
+  @moduledoc false
+  use Ash.Resource,
+    domain: Oauth2ServerTest.TenantedDomain,
+    data_layer: Ash.DataLayer.Ets
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+    global? true
+  end
+
+  attributes do
+    uuid_v7_primary_key :id
+    attribute :org_id, :string, public?: true, allow_nil?: false
+    attribute :email, :ci_string, public?: true, allow_nil?: false
+  end
+
+  actions do
+    defaults [:read, :destroy]
+    create :create, accept: [:org_id, :email]
+  end
+end
+
+defmodule Oauth2ServerTest.TenantedOAuthClient do
+  @moduledoc false
+  use Ash.Resource,
+    domain: Oauth2ServerTest.TenantedDomain,
+    data_layer: Ash.DataLayer.Ets
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+    global? true
+  end
+
+  attributes do
+    uuid_v7_primary_key :id
+    attribute :org_id, :string, public?: true, allow_nil?: false
+    attribute :client_name, :string, public?: true, allow_nil?: false
+    attribute :redirect_uris, {:array, :string}, public?: true, allow_nil?: false, default: []
+    attribute :grant_types, {:array, :string}, public?: true, default: ["authorization_code"]
+    attribute :response_types, {:array, :string}, public?: true, default: ["code"]
+    attribute :token_endpoint_auth_method, :string, public?: true, default: "none"
+    attribute :scope, :string, public?: true, default: "mcp"
+    attribute :last_used_at, :utc_datetime_usec, public?: true
+    create_timestamp :inserted_at
+    update_timestamp :updated_at
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :register do
+      accept [
+        :client_name,
+        :redirect_uris,
+        :grant_types,
+        :response_types,
+        :token_endpoint_auth_method,
+        :scope
+      ]
+    end
+
+    update :touch do
+      accept []
+      require_atomic? false
+      change set_attribute(:last_used_at, &DateTime.utc_now/0)
+    end
+  end
+end
+
+defmodule Oauth2ServerTest.TenantedOAuthAuthorizationCode do
+  @moduledoc false
+  use Ash.Resource,
+    domain: Oauth2ServerTest.TenantedDomain,
+    data_layer: Ash.DataLayer.Ets
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+    global? true
+  end
+
+  attributes do
+    uuid_v7_primary_key :id
+    attribute :org_id, :string, public?: true, allow_nil?: false
+    attribute :client_id, :uuid_v7, allow_nil?: false, public?: true
+    attribute :user_id, :uuid_v7, allow_nil?: false, public?: true
+    attribute :redirect_uri, :string, allow_nil?: false, public?: true
+    attribute :code_challenge, :string, allow_nil?: false, public?: true
+    attribute :scope, :string, allow_nil?: false, public?: true
+    attribute :resource_uri, :string, allow_nil?: false, public?: true
+    attribute :expires_at, :utc_datetime_usec, allow_nil?: false, public?: true
+    attribute :consumed_at, :utc_datetime_usec, public?: true
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :create do
+      accept [
+        :client_id,
+        :user_id,
+        :redirect_uri,
+        :code_challenge,
+        :scope,
+        :resource_uri,
+        :expires_at
+      ]
+    end
+
+    update :consume do
+      accept []
+      require_atomic? false
+
+      change fn changeset, _ ->
+        if Ash.Changeset.get_data(changeset, :consumed_at) do
+          Ash.Changeset.add_error(changeset, field: :consumed_at, message: "code already used")
+        else
+          Ash.Changeset.change_attribute(changeset, :consumed_at, DateTime.utc_now())
+        end
+      end
+    end
+  end
+end
+
+defmodule Oauth2ServerTest.TenantedOAuthRefreshToken do
+  @moduledoc false
+  use Ash.Resource,
+    domain: Oauth2ServerTest.TenantedDomain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshAuthentication.Oauth2Server.RefreshTokenResource]
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+    global? true
+  end
+
+  attributes do
+    uuid_v7_primary_key :id, writable?: true
+    attribute :org_id, :string, public?: true, allow_nil?: false
+    attribute :token_hash, :string, allow_nil?: false, public?: true
+    attribute :client_id, :uuid_v7, allow_nil?: false, public?: true
+    attribute :user_id, :uuid_v7, allow_nil?: false, public?: true
+    attribute :scope, :string, allow_nil?: false, public?: true
+    attribute :resource_uri, :string, allow_nil?: false, public?: true
+    attribute :expires_at, :utc_datetime_usec, allow_nil?: false, public?: true
+    attribute :rotated_to_id, :uuid_v7, public?: true
+    attribute :revoked_at, :utc_datetime_usec, public?: true
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :issue do
+      accept [:id, :token_hash, :client_id, :user_id, :scope, :resource_uri, :expires_at]
+    end
+
+    update :rotate do
+      argument :rotated_to_id, :uuid_v7, allow_nil?: false
+      accept []
+      require_atomic? false
+      change AshAuthentication.Oauth2Server.Changes.RotateRefreshToken
+    end
+
+    update :revoke do
+      accept []
+      require_atomic? false
+      change set_attribute(:revoked_at, &DateTime.utc_now/0)
+    end
+  end
+
+  identities do
+    identity :by_token_hash, [:token_hash], pre_check_with: Oauth2ServerTest.TenantedDomain
+  end
+end
+
+defmodule Oauth2ServerTest.TenantedOAuthConsent do
+  @moduledoc false
+  use Ash.Resource,
+    domain: Oauth2ServerTest.TenantedDomain,
+    data_layer: Ash.DataLayer.Ets
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+    global? true
+  end
+
+  attributes do
+    uuid_v7_primary_key :id
+    attribute :org_id, :string, public?: true, allow_nil?: false
+    attribute :user_id, :uuid_v7, allow_nil?: false, public?: true
+    attribute :client_id, :uuid_v7, allow_nil?: false, public?: true
+    attribute :scope, :string, allow_nil?: false, public?: true
+
+    attribute :granted_at, :utc_datetime_usec,
+      allow_nil?: false,
+      public?: true,
+      default: &DateTime.utc_now/0
+  end
+
+  actions do
+    defaults [:read, :destroy]
+
+    create :grant do
+      upsert? true
+      upsert_identity :by_user_client
+      accept [:user_id, :client_id, :scope]
+    end
+  end
+
+  identities do
+    identity :by_user_client, [:user_id, :client_id],
+      pre_check_with: Oauth2ServerTest.TenantedDomain
+  end
+end
+
+defmodule Oauth2ServerTest.TenantedDomain do
+  @moduledoc false
+  use Ash.Domain
+
+  resources do
+    resource Oauth2ServerTest.TenantedUser
+    resource Oauth2ServerTest.TenantedOAuthClient
+    resource Oauth2ServerTest.TenantedOAuthAuthorizationCode
+    resource Oauth2ServerTest.TenantedOAuthRefreshToken
+    resource Oauth2ServerTest.TenantedOAuthConsent
+  end
+end
+
+defmodule Oauth2ServerTest.TenantedServer do
+  @moduledoc """
+  Server pointed at the tenant-aware resources, so multitenancy tests
+  can exercise tenant threading through every protocol path.
+  """
+
+  use AshAuthentication.Oauth2Server,
+    otp_app: :ash_authentication_oauth2_server,
+    user_resource: Oauth2ServerTest.TenantedUser,
+    issuer_url: {Oauth2ServerTest.Secrets, []},
+    resource_url: {Oauth2ServerTest.Secrets, []},
+    signing_secret: {Oauth2ServerTest.Secrets, []},
+    client_resource: Oauth2ServerTest.TenantedOAuthClient,
+    authorization_code_resource: Oauth2ServerTest.TenantedOAuthAuthorizationCode,
+    refresh_token_resource: Oauth2ServerTest.TenantedOAuthRefreshToken,
+    consent_resource: Oauth2ServerTest.TenantedOAuthConsent,
+    scopes: ["mcp"],
+    dcr_enabled?: true
+end

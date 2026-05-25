@@ -105,7 +105,7 @@ if Code.ensure_loaded?(Igniter) do
         ],
         defaults: [
           issuer_url: "http://localhost:4000",
-          scope: "example.scope"
+          scope: "mcp"
         ]
       }
     end

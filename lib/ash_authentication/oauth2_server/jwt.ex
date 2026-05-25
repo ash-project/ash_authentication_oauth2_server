@@ -31,7 +31,13 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
   Mint a new access token.
 
   Required keys: `:sub`, `:client_id`, `:scope`.
-  Optional: `:ttl` (seconds, defaults to the server's `access_token_lifetime`).
+  Optional:
+
+    * `:ttl` — seconds; defaults to the server's `access_token_lifetime`.
+    * `:tenant` — when present (and non-nil), baked into the token as a
+      `"tenant"` claim so the resource server can re-set the Ash tenant
+      on the conn via `BearerPlug`. Multi-tenant deployments need this;
+      single-tenant deployments can ignore it.
   """
   @spec mint(server :: module(), keyword()) ::
           {:ok, String.t(), map()} | {:error, term()}
@@ -42,23 +48,38 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     ttl = Keyword.get(opts, :ttl, server.access_token_lifetime())
     now = System.system_time(:second)
 
-    claims = %{
-      "iss" => server.issuer_url(),
-      "sub" => to_string(sub),
-      "aud" => server.resource_url(),
-      "client_id" => to_string(client_id),
-      "scope" => scope,
-      "iat" => now,
-      "nbf" => now,
-      "exp" => now + ttl,
-      "jti" => generate_jti()
-    }
+    claims =
+      %{
+        "iss" => server.issuer_url(),
+        "sub" => to_string(sub),
+        "aud" => server.resource_url(),
+        "client_id" => to_string(client_id),
+        "scope" => scope,
+        "iat" => now,
+        "nbf" => now,
+        "exp" => now + ttl,
+        "jti" => generate_jti()
+      }
+      |> maybe_put_tenant(opts[:tenant], server.user_resource())
 
     signer = Joken.Signer.create(@signer_alg, server.signing_secret())
 
     case Joken.encode_and_sign(claims, signer) do
       {:ok, token, _} -> {:ok, token, claims}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Normalize via `Ash.ToTenant` — the same protocol Ash itself uses to
+  # canonicalize tenants. For attribute-based multitenancy this is
+  # typically a passthrough; for resource-record tenants it extracts the
+  # tenant attribute. Mirrors `AshAuthentication.Jwt.Config.maybe_add_tenant_claim/3`.
+  defp maybe_put_tenant(claims, nil, _resource), do: claims
+
+  defp maybe_put_tenant(claims, tenant, resource) do
+    case Ash.ToTenant.to_tenant(tenant, resource) do
+      nil -> claims
+      normalized -> Map.put(claims, "tenant", normalized)
     end
   end
 

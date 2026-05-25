@@ -7,13 +7,22 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   Protocol-pure logic for the `/oauth/authorize` endpoint.
 
   Controllers in `ash_authentication_phoenix` are thin wrappers around
-  `validate_request/2`, `consented?/4`, `grant_consent!/4`, and
-  `issue_code!/3`. None of these functions touch `Plug.Conn`.
+  `validate_request/3`, `consented?/5`, `grant_consent!/5`, and
+  `issue_code!/4`. None of these functions touch `Plug.Conn`.
+
+  ## Authorization & tenancy
+
+  All Ash calls run through the `AshAuthentication.Checks.AshAuthenticationInteraction`
+  bypass (set by the installer) rather than `authorize?: false`. Every public
+  function accepts an `opts` keyword that may include `:tenant`; when set, it's
+  threaded to every action so multi-tenant resources scope correctly.
   """
 
   require Ash.Query
 
   alias AshAuthentication.Oauth2Server
+
+  @ash_context %{private: %{ash_authentication?: true}}
 
   @typedoc """
   The validated authorize-request payload. The struct is intentionally small —
@@ -27,6 +36,9 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
           state: String.t(),
           resource: String.t()
         }
+
+  @typedoc "Options shared across this module's public functions."
+  @type opts :: [tenant: any()]
 
   @doc """
   Validate an inbound authorize request.
@@ -60,13 +72,13 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   We don't enforce a shape or entropy minimum here, but anything other
   than a random per-request value defeats the purpose of `state`.
   """
-  @spec validate_request(server :: module(), params :: map()) ::
+  @spec validate_request(server :: module(), params :: map(), opts()) ::
           {:ok, validated()}
           | {:error, :bad_redirect_uri}
           | {:error, String.t(), String.t()}
-  def validate_request(server, params) do
+  def validate_request(server, params, opts \\ []) do
     with :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
-         {:ok, client} <- load_client(server, params),
+         {:ok, client} <- load_client(server, params, opts),
          :ok <- check_redirect_uri(params, client),
          :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
          {:ok, resource} <- resolve_resource(server, params),
@@ -99,12 +111,13 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
           server :: module(),
           user :: Ash.Resource.record(),
           client :: Ash.Resource.record(),
-          requested_scope :: String.t()
+          requested_scope :: String.t(),
+          opts()
         ) :: boolean()
-  def consented?(server, user, client, requested_scope) do
+  def consented?(server, user, client, requested_scope, opts \\ []) do
     server.consent_resource()
     |> Ash.Query.filter(user_id == ^user.id and client_id == ^client.id)
-    |> Ash.read_one(authorize?: false)
+    |> Ash.read_one(ash_opts(opts))
     |> case do
       {:ok, %{scope: stored}} -> scope_covers?(stored, requested_scope)
       _ -> false
@@ -118,16 +131,17 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
           server :: module(),
           user :: Ash.Resource.record(),
           client :: Ash.Resource.record(),
-          scope :: String.t()
+          scope :: String.t(),
+          opts()
         ) :: Ash.Resource.record()
-  def grant_consent!(server, user, client, scope) do
+  def grant_consent!(server, user, client, scope, opts \\ []) do
     server.consent_resource()
     |> Ash.Changeset.for_create(:grant, %{
       user_id: user.id,
       client_id: client.id,
       scope: scope
     })
-    |> Ash.create!(authorize?: false)
+    |> Ash.create!(ash_opts(opts))
   end
 
   @doc """
@@ -137,9 +151,10 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   @spec issue_code!(
           server :: module(),
           user :: Ash.Resource.record(),
-          validated :: validated()
+          validated :: validated(),
+          opts()
         ) :: Ash.Resource.record()
-  def issue_code!(server, user, validated) do
+  def issue_code!(server, user, validated, opts \\ []) do
     expires_at =
       DateTime.add(DateTime.utc_now(), server.authorization_code_lifetime(), :second)
 
@@ -153,10 +168,20 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
       resource_uri: validated.resource,
       expires_at: expires_at
     })
-    |> Ash.create!(authorize?: false)
+    |> Ash.create!(ash_opts(opts))
   end
 
   # ── helpers ──────────────────────────────────────────────────────────────
+
+  # Builds the standard Ash opts: bypass context + tenant if provided.
+  defp ash_opts(opts) do
+    base = [context: @ash_context]
+
+    case Keyword.get(opts, :tenant) do
+      nil -> base
+      tenant -> Keyword.put(base, :tenant, tenant)
+    end
+  end
 
   defp require_eq(params, key, expected, error_code) do
     case Map.get(params, key) do
@@ -172,14 +197,15 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     end
   end
 
-  defp load_client(server, %{"client_id" => id}) do
-    case Ash.get(server.client_resource(), id, authorize?: false) do
+  defp load_client(server, %{"client_id" => id}, opts) do
+    case Ash.get(server.client_resource(), id, ash_opts(opts)) do
       {:ok, client} -> {:ok, client}
       _ -> {:error, "invalid_client", "unknown client_id"}
     end
   end
 
-  defp load_client(_server, _params), do: {:error, "invalid_request", "client_id required"}
+  defp load_client(_server, _params, _opts),
+    do: {:error, "invalid_request", "client_id required"}
 
   # RFC 9700 §4.1 — exact byte-equal match. No normalization, no
   # default-port elision, no trailing-slash equivalence. The client MUST
