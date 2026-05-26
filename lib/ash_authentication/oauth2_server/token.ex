@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 ash_authentication_oauth2_server contributors <https://github.com/team-alembic/ash_authentication_oauth2_server/graphs/contributors>
+# SPDX-FileCopyrightText: 2026 ash_authentication_oauth2_server contributors <https://github.com/ash-project/ash_authentication_oauth2_server/graphs/contributors>
 #
 # SPDX-License-Identifier: MIT
 
@@ -85,9 +85,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   defp consume_code(server, %{"code" => code_id, "client_id" => client_id}, opts)
        when is_binary(code_id) and is_binary(client_id) do
     with {:ok, code} <-
-           code_or_error(
-             Ash.get(server.authorization_code_resource(), code_id, ash_opts(opts))
-           ),
+           code_or_error(Ash.get(server.authorization_code_resource(), code_id, ash_opts(opts))),
          :ok <- check_client_match(code, client_id),
          :ok <- check_not_consumed(code),
          :ok <- check_not_expired(code),

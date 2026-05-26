@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 ash_authentication_oauth2_server contributors <https://github.com/team-alembic/ash_authentication_oauth2_server/graphs/contributors>
+# SPDX-FileCopyrightText: 2026 ash_authentication_oauth2_server contributors <https://github.com/ash-project/ash_authentication_oauth2_server/graphs/contributors>
 #
 # SPDX-License-Identifier: MIT
 
@@ -26,8 +26,8 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       aliases: aliases(),
       docs: &docs/0,
       description: @description,
-      source_url: "https://github.com/team-alembic/ash_authentication_oauth2_server",
-      homepage_url: "https://github.com/team-alembic/ash_authentication_oauth2_server",
+      source_url: "https://github.com/ash-project/ash_authentication_oauth2_server",
+      homepage_url: "https://github.com/ash-project/ash_authentication_oauth2_server",
       dialyzer: [
         plt_add_apps: [:mix, :ex_unit]
       ],
@@ -53,12 +53,12 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       licenses: ["MIT"],
       files: ~w(lib .formatter.exs mix.exs README* documentation LICENSES),
       links: %{
-        "Source" => "https://github.com/team-alembic/ash_authentication_oauth2_server",
-        "GitHub" => "https://github.com/team-alembic/ash_authentication_oauth2_server",
+        "Source" => "https://github.com/ash-project/ash_authentication_oauth2_server",
+        "GitHub" => "https://github.com/ash-project/ash_authentication_oauth2_server",
         "Discord" => "https://discord.gg/HTHRaaVPUc",
         "Website" => "https://ash-hq.org",
         "REUSE Compliance" =>
-          "https://api.reuse.software/info/github.com/team-alembic/ash_authentication_oauth2_server"
+          "https://api.reuse.software/info/github.com/ash-project/ash_authentication_oauth2_server"
       }
     ]
   end

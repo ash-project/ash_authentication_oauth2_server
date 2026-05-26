@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 ash_authentication_oauth2_server contributors <https://github.com/team-alembic/ash_authentication_oauth2_server/graphs/contributors>
+# SPDX-FileCopyrightText: 2026 ash_authentication_oauth2_server contributors <https://github.com/ash-project/ash_authentication_oauth2_server/graphs/contributors>
 #
 # SPDX-License-Identifier: MIT
 
@@ -13,7 +13,7 @@ if Mix.env() == :dev do
     mix_project: AshAuthentication.Oauth2Server.MixProject,
     github_handle_lookup?: true,
     changelog_file: "CHANGELOG.md",
-    repository_url: "https://github.com/team-alembic/ash_authentication_oauth2_server",
+    repository_url: "https://github.com/ash-project/ash_authentication_oauth2_server",
     # Manage the version in `mix.exs`
     manage_mix_version?: true,
     # Manage the version in `README.md` (and any other doc that calls it out)
