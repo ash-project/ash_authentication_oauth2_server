@@ -57,8 +57,7 @@ defmodule Oauth2ServerTest.OAuthClient do
 
     update :touch do
       accept []
-      require_atomic? false
-      change set_attribute(:last_used_at, &DateTime.utc_now/0)
+      change atomic_update(:last_used_at, expr(now()))
     end
   end
 end
@@ -98,18 +97,12 @@ defmodule Oauth2ServerTest.OAuthAuthorizationCode do
 
     update :consume do
       accept []
-      require_atomic? false
 
-      change fn changeset, _ ->
-        if Ash.Changeset.get_data(changeset, :consumed_at) do
-          Ash.Changeset.add_error(changeset,
-            field: :consumed_at,
-            message: "code already used"
-          )
-        else
-          Ash.Changeset.change_attribute(changeset, :consumed_at, DateTime.utc_now())
-        end
+      validate absent(:consumed_at) do
+        message "code already used"
       end
+
+      change atomic_update(:consumed_at, expr(now()))
     end
   end
 end
@@ -141,6 +134,11 @@ defmodule Oauth2ServerTest.OAuthRefreshToken do
       accept [:id, :token_hash, :client_id, :user_id, :scope, :resource_uri, :expires_at]
     end
 
+    # `require_atomic? false` is necessary on the actions below only because
+    # the ETS-backed test identity uses `pre_check_with:`, which attaches a
+    # `:before_action` hook that's incompatible with atomic execution.
+    # Production-generated resources (Postgres) don't use `pre_check_with`,
+    # so the install task generates these actions without this opt-out.
     update :rotate do
       argument :rotated_to_id, :uuid_v7, allow_nil?: false
       accept []
@@ -409,8 +407,7 @@ defmodule Oauth2ServerTest.TenantedOAuthClient do
 
     update :touch do
       accept []
-      require_atomic? false
-      change set_attribute(:last_used_at, &DateTime.utc_now/0)
+      change atomic_update(:last_used_at, expr(now()))
     end
   end
 end
@@ -457,15 +454,12 @@ defmodule Oauth2ServerTest.TenantedOAuthAuthorizationCode do
 
     update :consume do
       accept []
-      require_atomic? false
 
-      change fn changeset, _ ->
-        if Ash.Changeset.get_data(changeset, :consumed_at) do
-          Ash.Changeset.add_error(changeset, field: :consumed_at, message: "code already used")
-        else
-          Ash.Changeset.change_attribute(changeset, :consumed_at, DateTime.utc_now())
-        end
+      validate absent(:consumed_at) do
+        message "code already used"
       end
+
+      change atomic_update(:consumed_at, expr(now()))
     end
   end
 end
@@ -503,6 +497,8 @@ defmodule Oauth2ServerTest.TenantedOAuthRefreshToken do
       accept [:id, :token_hash, :client_id, :user_id, :scope, :resource_uri, :expires_at]
     end
 
+    # See `Oauth2ServerTest.OAuthRefreshToken` for why `require_atomic? false`
+    # is set here — ETS identity `pre_check_with:` adds an incompatible hook.
     update :rotate do
       argument :rotated_to_id, :uuid_v7, allow_nil?: false
       accept []

@@ -20,7 +20,6 @@ defmodule AshAuthentication.Oauth2Server.Changes.RotateRefreshToken do
       update :rotate do
         argument :rotated_to_id, :uuid_v7, allow_nil?: false
         accept []
-        require_atomic? false
 
         change AshAuthentication.Oauth2Server.Changes.RotateRefreshToken
       end

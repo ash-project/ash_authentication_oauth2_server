@@ -147,7 +147,6 @@ defmodule AshAuthentication.Oauth2Server.RefreshTokenResource.Verifier do
           update :rotate do
             argument :rotated_to_id, :uuid_v7, allow_nil?: false
             accept []
-            require_atomic? false
 
             change #{inspect(@rotate_change)}
           end

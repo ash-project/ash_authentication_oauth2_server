@@ -231,8 +231,7 @@ if Code.ensure_loaded?(Igniter) do
       |> Ash.Resource.Igniter.add_new_action(mod, :touch, """
       update :touch do
         accept []
-        require_atomic? false
-        change set_attribute(:last_used_at, &DateTime.utc_now/0)
+        change atomic_update(:last_used_at, expr(now()))
       end
       """)
       |> add_authn_bypass(mod)
@@ -278,15 +277,12 @@ if Code.ensure_loaded?(Igniter) do
       |> Ash.Resource.Igniter.add_new_action(mod, :consume, """
       update :consume do
         accept []
-        require_atomic? false
 
-        change fn changeset, _ ->
-          if Ash.Changeset.get_data(changeset, :consumed_at) do
-            Ash.Changeset.add_error(changeset, field: :consumed_at, message: "code already used")
-          else
-            Ash.Changeset.change_attribute(changeset, :consumed_at, DateTime.utc_now())
-          end
+        validate absent(:consumed_at) do
+          message "code already used"
         end
+
+        change atomic_update(:consumed_at, expr(now()))
       end
       """)
       |> add_authn_bypass(mod)
@@ -347,7 +343,6 @@ if Code.ensure_loaded?(Igniter) do
       update :rotate do
         argument :rotated_to_id, :uuid_v7, allow_nil?: false
         accept []
-        require_atomic? false
 
         change AshAuthentication.Oauth2Server.Changes.RotateRefreshToken
       end
@@ -355,8 +350,7 @@ if Code.ensure_loaded?(Igniter) do
       |> Ash.Resource.Igniter.add_new_action(mod, :revoke, """
       update :revoke do
         accept []
-        require_atomic? false
-        change set_attribute(:revoked_at, &DateTime.utc_now/0)
+        change atomic_update(:revoked_at, expr(now()))
       end
       """)
       |> Ash.Resource.Igniter.add_new_identity(mod, :by_token_hash, """
