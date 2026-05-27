@@ -195,24 +195,24 @@ defmodule AshAuthentication.Oauth2Server do
       def authorization_code_lifetime,
         do: Oauth2Server.__lifetime_seconds__(@oauth2_server_opts[:authorization_code_lifetime])
 
-      def issuer_url do
+      def issuer_url(context \\ %{}) do
         @oauth2_server_opts
         |> Keyword.fetch!(:issuer_url)
-        |> Oauth2Server.__resolve_secret__!(__MODULE__, [:issuer_url])
+        |> Oauth2Server.__resolve_secret__!(__MODULE__, [:issuer_url], context)
         |> Oauth2Server.__normalize_url__()
       end
 
-      def resource_url do
+      def resource_url(context \\ %{}) do
         @oauth2_server_opts
         |> Keyword.fetch!(:resource_url)
-        |> Oauth2Server.__resolve_secret__!(__MODULE__, [:resource_url])
+        |> Oauth2Server.__resolve_secret__!(__MODULE__, [:resource_url], context)
         |> Oauth2Server.__normalize_url__()
       end
 
-      def signing_secret do
+      def signing_secret(context \\ %{}) do
         @oauth2_server_opts
         |> Keyword.fetch!(:signing_secret)
-        |> Oauth2Server.__resolve_secret__!(__MODULE__, [:signing_secret])
+        |> Oauth2Server.__resolve_secret__!(__MODULE__, [:signing_secret], context)
       end
 
       @doc """
@@ -301,8 +301,8 @@ defmodule AshAuthentication.Oauth2Server do
     do: raise(ArgumentError, "invalid lifetime: #{inspect(other)}")
 
   @doc false
-  def __resolve_secret__!(value, module, path) do
-    case resolve_secret(value, module, path) do
+  def __resolve_secret__!(value, module, path, context \\ %{}) do
+    case resolve_secret(value, module, path, context) do
       {:ok, resolved} ->
         resolved
 
@@ -314,19 +314,20 @@ defmodule AshAuthentication.Oauth2Server do
     end
   end
 
-  defp resolve_secret(value, _module, _path) when is_binary(value), do: {:ok, value}
+  defp resolve_secret(value, _module, _path, _context) when is_binary(value), do: {:ok, value}
 
-  defp resolve_secret({mod, opts}, module, path) when is_atom(mod) and is_list(opts) do
+  defp resolve_secret({mod, opts}, module, path, context)
+       when is_atom(mod) and is_list(opts) do
     Code.ensure_loaded(mod)
 
     if function_exported?(mod, :__secret_for_arity__, 0) do
-      AshAuthentication.Secret.secret_for(mod, path, module, opts, %{})
+      AshAuthentication.Secret.secret_for(mod, path, module, opts, context)
     else
       {:error, {:not_a_secret_module, mod}}
     end
   end
 
-  defp resolve_secret({mod, fun, args}, module, path)
+  defp resolve_secret({mod, fun, args}, module, path, _context)
        when is_atom(mod) and is_atom(fun) and is_list(args) do
     case apply(mod, fun, [path, module | args]) do
       {:ok, value} -> {:ok, value}
@@ -335,7 +336,7 @@ defmodule AshAuthentication.Oauth2Server do
     end
   end
 
-  defp resolve_secret(fun, module, path) when is_function(fun, 2) do
+  defp resolve_secret(fun, module, path, _context) when is_function(fun, 2) do
     case fun.(path, module) do
       {:ok, value} -> {:ok, value}
       :error -> :error
@@ -343,7 +344,8 @@ defmodule AshAuthentication.Oauth2Server do
     end
   end
 
-  defp resolve_secret(other, _module, _path), do: {:error, {:invalid_secret, other}}
+  defp resolve_secret(other, _module, _path, _context),
+    do: {:error, {:invalid_secret, other}}
 
   @doc false
   # Resolve the `:scopes` option, which may be a static list, a 0-arity

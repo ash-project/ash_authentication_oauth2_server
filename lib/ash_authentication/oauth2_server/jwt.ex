@@ -46,13 +46,15 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     client_id = Keyword.fetch!(opts, :client_id)
     scope = Keyword.fetch!(opts, :scope)
     ttl = Keyword.get(opts, :ttl, server.access_token_lifetime())
+    tenant = opts[:tenant]
+    secret_context = secret_context(tenant)
     now = System.system_time(:second)
 
     claims =
       %{
-        "iss" => server.issuer_url(),
+        "iss" => server.issuer_url(secret_context),
         "sub" => to_string(sub),
-        "aud" => server.resource_url(),
+        "aud" => server.resource_url(secret_context),
         "client_id" => to_string(client_id),
         "scope" => scope,
         "iat" => now,
@@ -60,15 +62,18 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
         "exp" => now + ttl,
         "jti" => generate_jti()
       }
-      |> maybe_put_tenant(opts[:tenant], server.user_resource())
+      |> maybe_put_tenant(tenant, server.user_resource())
 
-    signer = Joken.Signer.create(@signer_alg, server.signing_secret())
+    signer = Joken.Signer.create(@signer_alg, server.signing_secret(secret_context))
 
     case Joken.encode_and_sign(claims, signer) do
       {:ok, token, _} -> {:ok, token, claims}
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp secret_context(nil), do: %{}
+  defp secret_context(tenant), do: %{tenant: tenant}
 
   # Normalize via `Ash.ToTenant` — the same protocol Ash itself uses to
   # canonicalize tenants. For attribute-based multitenancy this is
@@ -99,8 +104,9 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     skew = server.clock_skew_seconds()
 
     with {:ok, claims} <- Joken.verify(token, signer),
-         :ok <- check_iss(claims, server),
-         :ok <- check_aud(claims, server),
+         secret_context <- secret_context(claims["tenant"]),
+         :ok <- check_iss(claims, server, secret_context),
+         :ok <- check_aud(claims, server, secret_context),
          :ok <- check_nbf(claims, skew),
          :ok <- check_exp(claims, skew) do
       {:ok, claims}
@@ -109,14 +115,14 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
 
   def verify(_, _), do: {:error, :invalid_token}
 
-  defp check_iss(%{"iss" => iss}, server) do
-    if iss == server.issuer_url(), do: :ok, else: {:error, :invalid_issuer}
+  defp check_iss(%{"iss" => iss}, server, secret_context) do
+    if iss == server.issuer_url(secret_context), do: :ok, else: {:error, :invalid_issuer}
   end
 
-  defp check_iss(_, _), do: {:error, :invalid_issuer}
+  defp check_iss(_, _, _), do: {:error, :invalid_issuer}
 
-  defp check_aud(%{"aud" => aud}, server) do
-    expected = server.resource_url()
+  defp check_aud(%{"aud" => aud}, server, secret_context) do
+    expected = server.resource_url(secret_context)
 
     cond do
       aud == expected -> :ok
@@ -125,7 +131,7 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     end
   end
 
-  defp check_aud(_, _), do: {:error, :invalid_audience}
+  defp check_aud(_, _, _), do: {:error, :invalid_audience}
 
   defp check_exp(%{"exp" => exp}, skew) when is_integer(exp) do
     if System.system_time(:second) < exp + skew, do: :ok, else: {:error, :expired}

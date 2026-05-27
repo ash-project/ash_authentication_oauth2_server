@@ -50,7 +50,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     conn
     |> put_resp_header("content-type", "application/json")
     |> put_resp_header("cache-control", "public, max-age=3600")
-    |> send_resp(200, Jason.encode!(Metadata.protected_resource(server)))
+    |> send_resp(200, Jason.encode!(Metadata.protected_resource(server, secret_context(conn))))
     |> halt()
   end
 
@@ -170,8 +170,18 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     conn
     |> put_resp_header("content-type", "application/json")
     |> put_resp_header("cache-control", "public, max-age=3600")
-    |> send_resp(200, Jason.encode!(Metadata.authorization_server(server)))
+    |> send_resp(
+      200,
+      Jason.encode!(Metadata.authorization_server(server, secret_context(conn)))
+    )
     |> halt()
+  end
+
+  defp secret_context(conn) do
+    case Ash.PlugHelpers.get_tenant(conn) do
+      nil -> %{}
+      tenant -> %{tenant: tenant}
+    end
   end
 
   defp token_response_json(%{} = response) do

@@ -77,11 +77,13 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
           | {:error, :bad_redirect_uri}
           | {:error, String.t(), String.t()}
   def validate_request(server, params, opts \\ []) do
+    secret_context = secret_context(Keyword.get(opts, :tenant))
+
     with :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
          {:ok, client} <- load_client(server, params, opts),
          :ok <- check_redirect_uri(params, client),
          :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
-         {:ok, resource} <- resolve_resource(server, params),
+         {:ok, resource} <- resolve_resource(server, params, secret_context),
          {:ok, code_challenge} <- require_present(params, "code_challenge"),
          {:ok, scope} <- require_present(params, "scope"),
          :ok <- check_scopes(server, scope),
@@ -240,8 +242,9 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   # We echo the *expected* URL (server-controlled) in the error description
   # rather than the user-supplied value, so the message is useful without
   # creating a "reflect user input" surface.
-  defp resolve_resource(server, %{"resource" => res}) when is_binary(res) and res != "" do
-    expected = server.resource_url()
+  defp resolve_resource(server, %{"resource" => res}, secret_context)
+       when is_binary(res) and res != "" do
+    expected = server.resource_url(secret_context)
 
     if Oauth2Server.__normalize_url__(res) == expected,
       do: {:ok, expected},
@@ -251,7 +254,11 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
            "(expected: #{expected})"}
   end
 
-  defp resolve_resource(server, _), do: {:ok, server.resource_url()}
+  defp resolve_resource(server, _, secret_context),
+    do: {:ok, server.resource_url(secret_context)}
+
+  defp secret_context(nil), do: %{}
+  defp secret_context(tenant), do: %{tenant: tenant}
 
   defp scope_covers?(stored, requested) when is_binary(stored) and is_binary(requested) do
     stored_set = stored |> String.split(" ", trim: true) |> MapSet.new()

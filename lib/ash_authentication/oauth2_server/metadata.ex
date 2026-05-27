@@ -16,12 +16,16 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
 
   @doc """
   Build the OAuth Protected Resource Metadata document (RFC 9728).
+
+  `context` is forwarded to the server's `resource_url/1` and `issuer_url/1`
+  callbacks so per-request (e.g. per-tenant) resolution works. Single-tenant
+  callers can pass `%{}`.
   """
-  @spec protected_resource(server :: module()) :: map()
-  def protected_resource(server) do
+  @spec protected_resource(server :: module(), context :: map()) :: map()
+  def protected_resource(server, context \\ %{}) do
     %{
-      "resource" => server.resource_url(),
-      "authorization_servers" => [server.issuer_url()],
+      "resource" => server.resource_url(context),
+      "authorization_servers" => [server.issuer_url(context)],
       "scopes_supported" => server.scopes(),
       "bearer_methods_supported" => ["header"]
     }
@@ -31,11 +35,13 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
   Build the OAuth Authorization Server Metadata document (RFC 8414).
 
   Endpoint paths are derived from the `issuer_url` so that mounting under a
-  custom prefix works without configuration.
+  custom prefix works without configuration. `context` is forwarded to
+  `issuer_url/1` so per-tenant deployments can resolve the issuer from the
+  current request.
   """
-  @spec authorization_server(server :: module()) :: map()
-  def authorization_server(server) do
-    issuer = server.issuer_url()
+  @spec authorization_server(server :: module(), context :: map()) :: map()
+  def authorization_server(server, context \\ %{}) do
+    issuer = server.issuer_url(context)
 
     base = %{
       "issuer" => issuer,

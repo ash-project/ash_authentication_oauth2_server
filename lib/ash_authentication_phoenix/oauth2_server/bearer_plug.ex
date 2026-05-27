@@ -204,7 +204,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
     # path. Strip path/query from the resource URL so the metadata URL
     # points at <scheme>://<host>/.well-known/oauth-protected-resource.
     metadata_url =
-      server.resource_url()
+      server.resource_url(secret_context(conn))
       |> URI.parse()
       |> Map.merge(%{path: "/.well-known/oauth-protected-resource", query: nil, fragment: nil})
       |> URI.to_string()
@@ -225,5 +225,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
     )
     |> send_resp(401, "")
     |> halt()
+  end
+
+  defp secret_context(conn) do
+    case Ash.PlugHelpers.get_tenant(conn) do
+      nil -> %{}
+      tenant -> %{tenant: tenant}
+    end
   end
 end

@@ -56,10 +56,11 @@ defmodule AshAuthentication.Oauth2Server.Token do
           | {:error, atom()}
   def exchange_authorization_code(server, params, opts \\ []) do
     tenant = Keyword.get(opts, :tenant)
+    secret_context = secret_context(tenant)
 
     with {:ok, code, client} <- consume_code(server, params, opts),
          :ok <- verify_pkce(code, params),
-         :ok <- check_resource_match(server, params, code),
+         :ok <- check_resource_match(server, params, code, secret_context),
          :ok <- check_redirect_match(params, code),
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
@@ -81,6 +82,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
        }}
     end
   end
+
+  defp secret_context(nil), do: %{}
+  defp secret_context(tenant), do: %{tenant: tenant}
 
   defp consume_code(server, %{"code" => code_id, "client_id" => client_id}, opts)
        when is_binary(code_id) and is_binary(client_id) do
@@ -128,8 +132,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
   defp verify_pkce(_, _), do: {:error, :pkce}
 
   # `resource` is optional per RFC 8707 §2; if present it must match.
-  defp check_resource_match(server, params, code) do
-    expected = server.resource_url()
+  defp check_resource_match(server, params, code, secret_context) do
+    expected = server.resource_url(secret_context)
 
     cond do
       code.resource_uri != expected ->
@@ -180,7 +184,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
       when is_binary(raw) do
     hash = hash_refresh(raw)
     resource = Map.get(params, "resource")
-    expected_resource = server.resource_url()
+    expected_resource = server.resource_url(secret_context(Keyword.get(opts, :tenant)))
 
     # Allocate the new refresh row's identifiers upfront so the rotate
     # can atomically set `rotated_to_id = ^new_id` without a separate
