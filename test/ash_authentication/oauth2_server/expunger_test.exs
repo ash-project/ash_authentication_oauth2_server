@@ -162,7 +162,10 @@ defmodule AshAuthentication.Oauth2Server.ExpungerTest do
 
       # Clean up the survivor
       Ash.destroy!(
-        Ash.get!(TenantedOAuthRefreshToken, tenant_b_id, tenant: "tenant_b", context: @ash_context),
+        Ash.get!(TenantedOAuthRefreshToken, tenant_b_id,
+          tenant: "tenant_b",
+          context: @ash_context
+        ),
         context: @ash_context
       )
     end

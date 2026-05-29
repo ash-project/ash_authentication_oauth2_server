@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.2.0](https://github.com/ash-project/ash_authentication_oauth2_server/compare/v0.1.3...v0.2.0) (2026-05-29)
+
+
+
+
+### Features:
+
+* token cleanup, bulk chain revocation, and rotation telemetry by [@zachdaniel](https://github.com/zachdaniel)
+
 ## [v0.1.3](https://github.com/ash-project/ash_authentication_oauth2_server/compare/v0.1.2...v0.1.3) (2026-05-27)
 
 
