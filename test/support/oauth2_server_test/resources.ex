@@ -66,7 +66,8 @@ defmodule Oauth2ServerTest.OAuthAuthorizationCode do
   @moduledoc false
   use Ash.Resource,
     domain: Oauth2ServerTest.Domain,
-    data_layer: Ash.DataLayer.Ets
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshAuthentication.Oauth2Server.AuthorizationCodeResource]
 
   attributes do
     uuid_v7_primary_key :id
@@ -123,7 +124,10 @@ defmodule Oauth2ServerTest.OAuthRefreshToken do
     attribute :scope, :string, allow_nil?: false, public?: true
     attribute :resource_uri, :string, allow_nil?: false, public?: true
     attribute :expires_at, :utc_datetime_usec, allow_nil?: false, public?: true
+    attribute :chain_id, :uuid_v7, allow_nil?: false, public?: true
+    attribute :generation, :integer, allow_nil?: false, default: 0, public?: true
     attribute :rotated_to_id, :uuid_v7, public?: true
+    attribute :rotated_at, :utc_datetime_usec, public?: true
     attribute :revoked_at, :utc_datetime_usec, public?: true
   end
 
@@ -131,7 +135,17 @@ defmodule Oauth2ServerTest.OAuthRefreshToken do
     defaults [:read, :destroy]
 
     create :issue do
-      accept [:id, :token_hash, :client_id, :user_id, :scope, :resource_uri, :expires_at]
+      accept [
+        :id,
+        :chain_id,
+        :generation,
+        :token_hash,
+        :client_id,
+        :user_id,
+        :scope,
+        :resource_uri,
+        :expires_at
+      ]
     end
 
     # `require_atomic? false` is necessary on the actions below only because
@@ -416,7 +430,8 @@ defmodule Oauth2ServerTest.TenantedOAuthAuthorizationCode do
   @moduledoc false
   use Ash.Resource,
     domain: Oauth2ServerTest.TenantedDomain,
-    data_layer: Ash.DataLayer.Ets
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshAuthentication.Oauth2Server.AuthorizationCodeResource]
 
   multitenancy do
     strategy :attribute
@@ -486,7 +501,10 @@ defmodule Oauth2ServerTest.TenantedOAuthRefreshToken do
     attribute :scope, :string, allow_nil?: false, public?: true
     attribute :resource_uri, :string, allow_nil?: false, public?: true
     attribute :expires_at, :utc_datetime_usec, allow_nil?: false, public?: true
+    attribute :chain_id, :uuid_v7, allow_nil?: false, public?: true
+    attribute :generation, :integer, allow_nil?: false, default: 0, public?: true
     attribute :rotated_to_id, :uuid_v7, public?: true
+    attribute :rotated_at, :utc_datetime_usec, public?: true
     attribute :revoked_at, :utc_datetime_usec, public?: true
   end
 
@@ -494,7 +512,17 @@ defmodule Oauth2ServerTest.TenantedOAuthRefreshToken do
     defaults [:read, :destroy]
 
     create :issue do
-      accept [:id, :token_hash, :client_id, :user_id, :scope, :resource_uri, :expires_at]
+      accept [
+        :id,
+        :chain_id,
+        :generation,
+        :token_hash,
+        :client_id,
+        :user_id,
+        :scope,
+        :resource_uri,
+        :expires_at
+      ]
     end
 
     # See `Oauth2ServerTest.OAuthRefreshToken` for why `require_atomic? false`

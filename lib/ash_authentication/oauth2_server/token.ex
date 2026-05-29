@@ -199,7 +199,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
       :no_match ->
         case disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
           :reuse ->
-            revoke_chain(server, hash, opts)
+            revoke_chain_by_hash(server, hash, opts)
             {:error, :reuse}
 
           other ->
@@ -271,6 +271,11 @@ defmodule AshAuthentication.Oauth2Server.Token do
            server.refresh_token_resource()
            |> Ash.Changeset.for_create(:issue, %{
              id: new_id,
+             # Inherit the parent's chain_id so the whole rotation
+             # lineage shares one id — enables single-UPDATE chain
+             # revocation on reuse detection.
+             chain_id: old_row.chain_id,
+             generation: old_row.generation + 1,
              token_hash: new_hash,
              client_id: old_row.client_id,
              user_id: old_row.user_id,
@@ -348,7 +353,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
     hash = hash_refresh(raw)
 
     case find_refresh(server, hash, opts) do
-      {:ok, %{client_id: ^client_id} = row} -> revoke_descendants(server, row, opts)
+      {:ok, %{client_id: ^client_id} = row} -> revoke_chain_by_id(server, row.chain_id, opts)
       _ -> :ok
     end
 
@@ -382,12 +387,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp requested_resource_ok?(_, _), do: false
 
-  # On reuse detection, walk forward through `rotated_to_id` revoking every
-  # descendant of the offending token. RFC 6749 §4.3.1.
-  defp revoke_chain(server, hash, opts) do
+  # On reuse detection, revoke every refresh token in the chain in a
+  # single filtered UPDATE. RFC 6749 §4.3.1. Every row in a rotation
+  # lineage carries the same `chain_id` (set at initial issuance,
+  # inherited on rotation), so one filtered UPDATE clears them all.
+  defp revoke_chain_by_hash(server, hash, opts) do
     case find_refresh(server, hash, opts) do
       {:ok, row} ->
-        revoke_descendants(server, row, opts)
+        revoke_chain_by_id(server, row.chain_id, opts)
 
       _ ->
         Logger.warning(
@@ -398,24 +405,25 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  defp revoke_descendants(server, row, opts) do
-    case row |> Ash.Changeset.for_update(:revoke, %{}) |> Ash.update(ash_opts(opts)) do
-      {:ok, _} ->
+  defp revoke_chain_by_id(server, chain_id, opts) do
+    bulk_opts =
+      [return_records?: false, return_errors?: true, notify?: false]
+      |> Keyword.merge(ash_opts(opts))
+
+    server.refresh_token_resource()
+    |> Ash.Query.filter(chain_id == ^chain_id and is_nil(revoked_at))
+    |> Ash.bulk_update(:revoke, %{}, bulk_opts)
+    |> case do
+      %Ash.BulkResult{status: :success} ->
         :ok
 
-      {:error, reason} ->
+      %Ash.BulkResult{status: status, errors: errors} ->
         Logger.warning(
-          "Oauth2Server: failed to revoke refresh token #{inspect(row.id)}: #{inspect(reason)}"
+          "Oauth2Server: chain revocation for chain_id=#{inspect(chain_id)} " <>
+            "ended with status #{inspect(status)}: #{inspect(errors)}"
         )
-    end
 
-    if row.rotated_to_id do
-      case Ash.get(server.refresh_token_resource(), row.rotated_to_id, ash_opts(opts)) do
-        {:ok, next} -> revoke_descendants(server, next, opts)
-        _ -> :ok
-      end
-    else
-      :ok
+        :ok
     end
   end
 
@@ -424,9 +432,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
   defp issue_refresh_token(server, client_id, code, opts) do
     {raw, hash} = generate_refresh()
     expires_at = DateTime.add(DateTime.utc_now(), server.refresh_token_lifetime(), :second)
+    id = Ash.UUIDv7.generate()
 
     server.refresh_token_resource()
     |> Ash.Changeset.for_create(:issue, %{
+      id: id,
+      # Root of a fresh chain — chain_id points at this row's own id so
+      # every later rotation in the chain shares the same chain_id and
+      # reuse-detection can revoke the whole chain in one UPDATE.
+      chain_id: id,
       token_hash: hash,
       client_id: client_id,
       user_id: code.user_id,

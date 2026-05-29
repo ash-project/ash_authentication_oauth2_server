@@ -9,7 +9,7 @@ defmodule AshAuthentication.Oauth2Server.Changes.RotateRefreshToken do
   Attaches a filter expression — `is_nil(rotated_to_id) and is_nil(revoked_at)`
   — to the changeset so the underlying `UPDATE` only matches a row that's
   still valid AND unrotated AND unrevoked. The `:rotated_to_id` argument
-  is then written to the row.
+  is then written to the row alongside `:rotated_at = now()`.
 
   A concurrent rotation race produces one winner; the loser's UPDATE
   matches zero rows and the `Token` core treats it as `:reuse`, triggering
@@ -36,6 +36,7 @@ defmodule AshAuthentication.Oauth2Server.Changes.RotateRefreshToken do
     changeset
     |> Ash.Changeset.filter(Ash.Expr.expr(is_nil(rotated_to_id) and is_nil(revoked_at)))
     |> Ash.Changeset.force_change_attribute(:rotated_to_id, new_id)
+    |> Ash.Changeset.atomic_update(:rotated_at, Ash.Expr.expr(now()))
   end
 
   @impl true

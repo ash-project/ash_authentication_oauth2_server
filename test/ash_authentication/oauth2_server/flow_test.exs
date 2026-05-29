@@ -504,5 +504,74 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:error, :revoked} =
                Token.exchange_refresh_token(Server, refresh_params.(second.refresh_token))
     end
+
+    test "chain revocation revokes every rotation descendant in one shot",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      {:ok, first} =
+        Token.exchange_authorization_code(Server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "redirect_uri" => "https://chat.example.com/cb",
+          "code_verifier" => verifier,
+          "client_id" => client.id,
+          "resource" => Server.resource_url()
+        })
+
+      refresh_params = fn rt ->
+        %{
+          "grant_type" => "refresh_token",
+          "refresh_token" => rt,
+          "client_id" => client.id,
+          "resource" => Server.resource_url()
+        }
+      end
+
+      # Rotate the chain three times — four rows total in the chain.
+      {:ok, second} =
+        Token.exchange_refresh_token(Server, refresh_params.(first.refresh_token))
+
+      {:ok, third} =
+        Token.exchange_refresh_token(Server, refresh_params.(second.refresh_token))
+
+      {:ok, _fourth} =
+        Token.exchange_refresh_token(Server, refresh_params.(third.refresh_token))
+
+      rows_before =
+        Oauth2ServerTest.OAuthRefreshToken
+        |> Ash.read!(context: %{private: %{ash_authentication?: true}})
+
+      assert length(rows_before) == 4
+
+      # Every row carries the same chain_id (set on initial issuance,
+      # inherited through every rotation).
+      assert [chain_id] = rows_before |> Enum.map(& &1.chain_id) |> Enum.uniq()
+      refute is_nil(chain_id)
+
+      # Generation increments by 1 with every rotation, starting at 0.
+      generations = rows_before |> Enum.map(& &1.generation) |> Enum.sort()
+      assert generations == [0, 1, 2, 3]
+
+      # Trigger chain revocation by reusing the original refresh token.
+      assert {:error, :reuse} =
+               Token.exchange_refresh_token(Server, refresh_params.(first.refresh_token))
+
+      rows_after =
+        Oauth2ServerTest.OAuthRefreshToken
+        |> Ash.read!(context: %{private: %{ash_authentication?: true}})
+
+      assert length(rows_after) == 4
+      assert Enum.all?(rows_after, &(not is_nil(&1.revoked_at)))
+    end
   end
 end

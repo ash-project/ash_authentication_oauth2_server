@@ -121,6 +121,7 @@ if Code.ensure_loaded?(Igniter) do
           |> generate_server_module(options)
           |> add_secrets(options)
           |> add_app_config(options)
+          |> add_supervisor()
           |> then(fn igniter ->
             Igniter.add_notice(
               igniter,
@@ -285,6 +286,10 @@ if Code.ensure_loaded?(Igniter) do
         change atomic_update(:consumed_at, expr(now()))
       end
       """)
+      |> Igniter.compose_task("ash.extend", [
+        inspect(mod),
+        "AshAuthentication.Oauth2Server.AuthorizationCodeResource"
+      ])
       |> add_authn_bypass(mod)
     end
 
@@ -312,7 +317,11 @@ if Code.ensure_loaded?(Igniter) do
         "--attribute",
         "expires_at:utc_datetime_usec:required:public",
         "--attribute",
+        "chain_id:uuid_v7:required:public",
+        "--attribute",
         "rotated_to_id:uuid_v7:public",
+        "--attribute",
+        "rotated_at:utc_datetime_usec:public",
         "--attribute",
         "revoked_at:utc_datetime_usec:public",
         "--extend",
@@ -331,9 +340,19 @@ if Code.ensure_loaded?(Igniter) do
         public? true
       end
       """)
+      # Generation counter: 0 at initial issue, incremented by 1 on
+      # every rotation. The library doesn't enforce a max — surface it
+      # for end users to enforce if they want.
+      |> Ash.Resource.Igniter.add_new_attribute(mod, :generation, """
+      attribute :generation, :integer do
+        allow_nil? false
+        default 0
+        public? true
+      end
+      """)
       |> Ash.Resource.Igniter.add_new_action(mod, :issue, """
       create :issue do
-        accept [:id, :token_hash, :client_id, :user_id, :scope, :resource_uri, :expires_at]
+        accept [:id, :chain_id, :generation, :token_hash, :client_id, :user_id, :scope, :resource_uri, :expires_at]
       end
       """)
       # The change attaches the atomic filter + sets rotated_to_id. The
@@ -530,6 +549,15 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     # ── helpers ──────────────────────────────────────────────────────────
+
+    defp add_supervisor(igniter) do
+      otp_app = Igniter.Project.Application.app_name(igniter)
+
+      Igniter.Project.Application.add_new_child(
+        igniter,
+        {AshAuthentication.Oauth2Server.Supervisor, otp_app: otp_app}
+      )
+    end
 
     defp parent_namespace(module) do
       module

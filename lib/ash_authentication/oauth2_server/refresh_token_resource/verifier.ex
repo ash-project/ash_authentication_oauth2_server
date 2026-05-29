@@ -2,25 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-defmodule AshAuthentication.Oauth2Server.RefreshTokenResource do
-  @moduledoc """
-  Marker extension for an OAuth 2.1 refresh-token resource.
-
-  Registers `AshAuthentication.Oauth2Server.RefreshTokenResource.Verifier`,
-  which checks at compile time that the resource conforms to the contract
-  the `Token` core depends on for race-safe rotation.
-
-  Add to your refresh-token resource:
-
-      use Ash.Resource,
-        extensions: [AshAuthentication.Oauth2Server.RefreshTokenResource],
-        ...
-  """
-
-  use Spark.Dsl.Extension,
-    verifiers: [AshAuthentication.Oauth2Server.RefreshTokenResource.Verifier]
-end
-
 defmodule AshAuthentication.Oauth2Server.RefreshTokenResource.Verifier do
   @moduledoc """
   Verifies the refresh-token resource has the shape the Token core
@@ -28,9 +9,15 @@ defmodule AshAuthentication.Oauth2Server.RefreshTokenResource.Verifier do
 
     * `:id` attribute is writable (the library pre-allocates the new
       refresh row's id so a rotation is one filtered UPDATE).
-    * `:rotate` action exists and carries a filter expression (filters
-      already-rotated / already-revoked rows out of the underlying
-      UPDATE; race-safety lives entirely here).
+    * Every attribute the `Token` core reads/writes exists with the
+      expected type — `token_hash`, `client_id`, `user_id`, `scope`,
+      `resource_uri`, `expires_at`, `rotated_to_id`, `rotated_at`,
+      `revoked_at`.
+    * `:rotate` action exists and carries
+      `AshAuthentication.Oauth2Server.Changes.RotateRefreshToken`,
+      which attaches the atomic filter (filters already-rotated /
+      already-revoked rows out of the underlying UPDATE; race-safety
+      lives entirely here).
 
   Violations raise at resource-compile time with a fix-it message.
   """
@@ -39,12 +26,110 @@ defmodule AshAuthentication.Oauth2Server.RefreshTokenResource.Verifier do
 
   alias Spark.{Dsl.Verifier, Error.DslError}
 
+  # Attributes the Token core reads or writes. Type lists permit either
+  # the canonical Ash type module or the shorthand atom the DSL accepts.
+  @required_attributes [
+    {:token_hash, [Ash.Type.String, :string], allow_nil?: false},
+    {:client_id, [Ash.Type.UUIDv7, :uuid_v7], allow_nil?: false},
+    {:scope, [Ash.Type.String, :string], allow_nil?: false},
+    {:resource_uri, [Ash.Type.String, :string], allow_nil?: false},
+    {:expires_at, [Ash.Type.UtcDatetimeUsec, :utc_datetime_usec], allow_nil?: false},
+    {:chain_id, [Ash.Type.UUIDv7, :uuid_v7], allow_nil?: false},
+    {:generation, [Ash.Type.Integer, :integer], allow_nil?: false},
+    {:rotated_to_id, [Ash.Type.UUIDv7, :uuid_v7], allow_nil?: true},
+    {:rotated_at, [Ash.Type.UtcDatetimeUsec, :utc_datetime_usec], allow_nil?: true},
+    {:revoked_at, [Ash.Type.UtcDatetimeUsec, :utc_datetime_usec], allow_nil?: true}
+  ]
+
+  @rotate_change AshAuthentication.Oauth2Server.Changes.RotateRefreshToken
+
   @impl true
   def verify(dsl_state) do
-    with :ok <- verify_id_writable(dsl_state) do
+    with :ok <- verify_id_writable(dsl_state),
+         :ok <- verify_required_attributes(dsl_state),
+         :ok <- verify_user_id_attribute(dsl_state) do
       verify_rotate_action(dsl_state)
     end
   end
+
+  defp verify_required_attributes(dsl_state) do
+    Enum.reduce_while(@required_attributes, :ok, fn {name, types, opts}, :ok ->
+      case verify_attribute(dsl_state, name, types, opts) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # `user_id` type depends on the host app's `User.id`. We check only
+  # that the attribute is declared and non-nullable.
+  defp verify_user_id_attribute(dsl_state) do
+    case attribute(dsl_state, :user_id) do
+      nil ->
+        {:error, missing_attribute_error(dsl_state, :user_id, "matching your User's id type")}
+
+      %{allow_nil?: true} ->
+        {:error, allow_nil_error(dsl_state, :user_id, false)}
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp verify_attribute(dsl_state, name, types, opts) do
+    case attribute(dsl_state, name) do
+      nil ->
+        {:error, missing_attribute_error(dsl_state, name, type_hint(types))}
+
+      attr ->
+        with :ok <- check_type(attr, types) do
+          check_allow_nil(dsl_state, attr, opts[:allow_nil?])
+        end
+    end
+  end
+
+  defp check_type(attr, types) do
+    if attr.type in types do
+      :ok
+    else
+      {:error,
+       DslError.exception(
+         path: [:attributes, attr.name],
+         message:
+           "The `:#{attr.name}` attribute must have type `#{type_hint(types)}` " <>
+             "(got `#{inspect(attr.type)}`)."
+       )}
+    end
+  end
+
+  defp check_allow_nil(dsl_state, attr, expected) do
+    if attr.allow_nil? == expected do
+      :ok
+    else
+      {:error, allow_nil_error(dsl_state, attr.name, expected)}
+    end
+  end
+
+  defp missing_attribute_error(dsl_state, name, type_hint) do
+    DslError.exception(
+      module: Verifier.get_persisted(dsl_state, :module),
+      path: [:attributes, name],
+      message:
+        "The OAuth2 refresh-token resource must declare an attribute " <>
+          "`:#{name}` (#{type_hint})."
+    )
+  end
+
+  defp allow_nil_error(dsl_state, name, expected) do
+    DslError.exception(
+      module: Verifier.get_persisted(dsl_state, :module),
+      path: [:attributes, name],
+      message: "The `:#{name}` attribute must have `allow_nil?: #{expected}`."
+    )
+  end
+
+  defp type_hint([_canonical, shorthand | _]), do: ":#{shorthand}"
+  defp type_hint([type | _]), do: inspect(type)
 
   defp verify_id_writable(dsl_state) do
     case attribute(dsl_state, :id) do
@@ -84,8 +169,6 @@ defmodule AshAuthentication.Oauth2Server.RefreshTokenResource.Verifier do
          )}
     end
   end
-
-  @rotate_change AshAuthentication.Oauth2Server.Changes.RotateRefreshToken
 
   defp verify_rotate_action(dsl_state) do
     case action(dsl_state, :rotate) do
