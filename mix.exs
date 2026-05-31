@@ -130,7 +130,9 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       ],
       credo: "credo --strict",
       sobelow: "sobelow --skip",
-      "deps.audit": ["deps.audit --ignore-package-names cowlib"]
+      "deps.audit": ["deps.audit --ignore-package-names cowlib"],
+      "spark.formatter":
+        "spark.formatter --extensions AshAuthentication.Oauth2Server.AuthorizationCodeResource,AshAuthentication.Oauth2Server.RefreshTokenResource"
     ]
   end
 end

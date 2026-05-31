@@ -33,6 +33,7 @@
     # {:my_task, "mix my_task", env: %{"MIX_ENV" => "prod"}},
     # {:my_tool, ["my_tool", "arg with spaces"]}
     {:credo, "mix credo --strict"},
+    {:check_formatter, command: "mix spark.formatter --check"},
     {:reuse, command: ["pipx", "run", "reuse", "lint", "-q"]}
   ]
 ]
