@@ -5,7 +5,7 @@
 defmodule AshAuthentication.Oauth2Server.MixProject do
   use Mix.Project
 
-  @version "0.2.1"
+  @version "0.2.2"
 
   @description """
   An OAuth 2.1 authorization server for Ash Framework apps — RFC 7591 dynamic
