@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.2.1](https://github.com/ash-project/ash_authentication_oauth2_server/compare/v0.2.0...v0.2.1) (2026-05-31)
+
+
+
+
+### Improvements:
+
+* add spark.formatter logic by [@zachdaniel](https://github.com/zachdaniel)
+
 ## [v0.2.0](https://github.com/ash-project/ash_authentication_oauth2_server/compare/v0.1.3...v0.2.0) (2026-05-29)
 
 
