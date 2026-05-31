@@ -116,6 +116,7 @@ if Code.ensure_loaded?(Igniter) do
       case Igniter.Project.Module.module_exists(igniter, options[:user]) do
         {true, igniter} ->
           igniter
+          |> Igniter.Project.Formatter.import_dep(:ash_authentication_oauth2_server)
           |> generate_resources(options)
           |> add_resources_to_domain(options)
           |> generate_server_module(options)
