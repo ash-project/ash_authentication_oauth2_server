@@ -117,6 +117,10 @@ if Code.ensure_loaded?(Igniter) do
         {true, igniter} ->
           igniter
           |> Igniter.Project.Formatter.import_dep(:ash_authentication_oauth2_server)
+          # For the default Client ID Metadata Document fetcher (the
+          # library declares req as optional; the CIMD-enabled config we
+          # scaffold needs it present).
+          |> Igniter.Project.Deps.add_dep({:req, "~> 0.5"})
           |> generate_resources(options)
           |> add_resources_to_domain(options)
           |> generate_server_module(options)
@@ -220,6 +224,8 @@ if Code.ensure_loaded?(Igniter) do
         "--attribute",
         "scope:string:public",
         "--attribute",
+        "cimd_url:string:public",
+        "--attribute",
         "last_used_at:utc_datetime_usec:public",
         "--timestamps",
         "--extend",
@@ -230,11 +236,25 @@ if Code.ensure_loaded?(Igniter) do
         accept [:client_name, :redirect_uris, :grant_types, :response_types, :token_endpoint_auth_method, :scope]
       end
       """)
+      # Clients that identify via a Client ID Metadata Document are
+      # upserted here, keyed by their metadata URL, every time their
+      # document is (re-)fetched during an authorization request.
+      |> Ash.Resource.Igniter.add_new_action(mod, :register_cimd, """
+      create :register_cimd do
+        upsert? true
+        upsert_identity :by_cimd_url
+
+        accept [:cimd_url, :client_name, :redirect_uris, :grant_types, :response_types, :token_endpoint_auth_method, :scope]
+      end
+      """)
       |> Ash.Resource.Igniter.add_new_action(mod, :touch, """
       update :touch do
         accept []
         change atomic_update(:last_used_at, expr(now()))
       end
+      """)
+      |> Ash.Resource.Igniter.add_new_identity(mod, :by_cimd_url, """
+      identity :by_cimd_url, [:cimd_url]
       """)
       |> add_authn_bypass(mod)
     end
@@ -471,6 +491,12 @@ if Code.ensure_loaded?(Igniter) do
         # `false` if your auth server is for a fixed set of first-party
         # clients only.
         dcr_enabled?: true,
+        # Client ID Metadata Documents — clients identify with an HTTPS
+        # URL pointing at their metadata. This is the registration
+        # mechanism the MCP spec (2026-07-28) recommends; DCR above is
+        # kept for backwards compatibility. Set to `false` if your auth
+        # server is for a fixed set of first-party clients only.
+        cimd_enabled?: true,
         sign_in_path: "/sign-in"
       """
 

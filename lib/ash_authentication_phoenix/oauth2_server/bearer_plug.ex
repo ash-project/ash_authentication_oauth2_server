@@ -24,13 +24,21 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
       pass through unchanged instead of returning 401. Useful for routes
       that should serve unauthenticated users with a different (e.g.
       session-based) signal.
+    * `:scope` — a scope string (or list of scope strings) advertised in
+      the 401 challenge as `scope="…"`. The MCP spec recommends this so
+      clients know which scopes to request during initial authorization
+      instead of asking for everything in `scopes_supported`. This is
+      advisory — it does not enforce anything; pair with
+      `AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug` for
+      enforcement.
 
   ## Failure behavior
 
   Per RFC 6750 §3, a missing or invalid token results in `401` with a
   `WWW-Authenticate: Bearer resource_metadata="..."` header pointing at
-  the protected-resource metadata endpoint, so MCP-style clients can
-  auto-discover the authorization server.
+  the protected-resource metadata endpoint (plus `scope="…"` when the
+  `:scope` option is set), so MCP-style clients can auto-discover the
+  authorization server and the scopes they should request.
 
   ## What ends up on the conn
 
@@ -60,37 +68,18 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   ### Gating an action on a scope
 
-  The minimum useful pattern is a plug that 403s when a required
-  scope isn't present. Drop one of these into your pipeline after
-  this plug, or write it inline in your controller:
-
-      defmodule MyAppWeb.RequireScope do
-        @behaviour Plug
-        import Plug.Conn
-
-        @impl true
-        def init(scope) when is_binary(scope), do: scope
-
-        @impl true
-        def call(conn, scope) do
-          scopes =
-            conn.assigns
-            |> Map.get(:oauth_claims, %{})
-            |> Map.get("scope", "")
-            |> String.split(" ", trim: true)
-
-          if scope in scopes do
-            conn
-          else
-            conn |> send_resp(403, "") |> halt()
-          end
-        end
-      end
+  Use `AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug` after
+  this plug — it 403s with the RFC 6750 `insufficient_scope` challenge
+  shape that step-up-capable clients understand:
 
       pipeline :mcp_read do
         plug AshAuthentication.Phoenix.Oauth2Server.BearerPlug,
-          oauth2_server: MyApp.Oauth2Server
-        plug MyAppWeb.RequireScope, "mcp.read"
+          oauth2_server: MyApp.Oauth2Server,
+          scope: "mcp.read"
+
+        plug AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug,
+          oauth2_server: MyApp.Oauth2Server,
+          scope: "mcp.read"
       end
 
   ### Reading scopes inside an Ash policy
@@ -121,20 +110,25 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   import Plug.Conn
 
   alias AshAuthentication.Oauth2Server.Jwt
+  alias AshAuthentication.Phoenix.Oauth2Server.Errors
 
   @impl Plug
   def init(opts) do
     %{
       server: Keyword.fetch!(opts, :oauth2_server),
-      required?: Keyword.get(opts, :required?, true)
+      required?: Keyword.get(opts, :required?, true),
+      scope: opts |> Keyword.get(:scope) |> normalize_scope()
     }
   end
 
+  defp normalize_scope(nil), do: nil
+  defp normalize_scope(scope), do: scope |> List.wrap() |> Enum.join(" ")
+
   @impl Plug
-  def call(conn, %{server: server, required?: required?}) do
+  def call(conn, %{server: server, required?: required?, scope: scope}) do
     case extract_token(conn) do
       :no_token when required? ->
-        challenge(conn, server, nil)
+        challenge(conn, server, nil, scope)
 
       :no_token ->
         conn
@@ -148,7 +142,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
             |> assign(:oauth_claims, claims)
 
           {:error, reason} when required? ->
-            challenge(conn, server, reason)
+            challenge(conn, server, reason, scope)
 
           {:error, _} ->
             conn
@@ -199,15 +193,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   defp maybe_put_tenant_opt(opts, _), do: opts
 
-  defp challenge(conn, server, reason) do
-    # PRM lives at the host root per RFC 9728, not under the resource's
-    # path. Strip path/query from the resource URL so the metadata URL
-    # points at <scheme>://<host>/.well-known/oauth-protected-resource.
-    metadata_url =
-      server.resource_url(secret_context(conn))
-      |> URI.parse()
-      |> Map.merge(%{path: "/.well-known/oauth-protected-resource", query: nil, fragment: nil})
-      |> URI.to_string()
+  defp challenge(conn, server, reason, scope) do
+    metadata_url = Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn))
+
+    scope_param = if scope, do: ~s|, scope="#{scope}"|, else: ""
 
     error_param =
       case reason do
@@ -221,16 +210,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
     conn
     |> put_resp_header(
       "www-authenticate",
-      ~s|Bearer resource_metadata="#{metadata_url}"#{error_param}|
+      ~s|Bearer resource_metadata="#{metadata_url}"#{scope_param}#{error_param}|
     )
     |> send_resp(401, "")
     |> halt()
-  end
-
-  defp secret_context(conn) do
-    case Ash.PlugHelpers.get_tenant(conn) do
-      nil -> %{}
-      tenant -> %{tenant: tenant}
-    end
   end
 end

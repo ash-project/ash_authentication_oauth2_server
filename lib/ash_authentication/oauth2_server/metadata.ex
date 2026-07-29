@@ -52,13 +52,21 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
       "grant_types_supported" => ["authorization_code", "refresh_token"],
       "code_challenge_methods_supported" => ["S256"],
       "token_endpoint_auth_methods_supported" => ["none"],
-      "scopes_supported" => server.scopes()
+      "scopes_supported" => server.scopes(),
+      # RFC 9207 — we include `iss` in every authorization response, and
+      # advertising that is a MUST once we do (RFC 9207 §2.3).
+      "authorization_response_iss_parameter_supported" => true
     }
 
+    base
     # Only advertise the DCR endpoint when it's actually enabled.
     # Clients use this field to decide whether to attempt registration.
-    if server.dcr_enabled?(),
-      do: Map.put(base, "registration_endpoint", issuer <> "/oauth/register"),
-      else: base
+    |> put_if(server.dcr_enabled?(), "registration_endpoint", issuer <> "/oauth/register")
+    # Clients check this before using a URL as their client_id (and fall
+    # back to DCR / pre-registration when it's absent).
+    |> put_if(server.cimd_enabled?(), "client_id_metadata_document_supported", true)
   end
+
+  defp put_if(map, true, key, value), do: Map.put(map, key, value)
+  defp put_if(map, false, _key, _value), do: map
 end

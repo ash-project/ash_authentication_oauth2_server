@@ -28,7 +28,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   require Ash.Query
   require Logger
 
-  alias AshAuthentication.Oauth2Server.{Jwt, PKCE}
+  alias AshAuthentication.Oauth2Server.{CIMD, Jwt, PKCE}
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -58,14 +58,18 @@ defmodule AshAuthentication.Oauth2Server.Token do
     tenant = Keyword.get(opts, :tenant)
     secret_context = secret_context(tenant)
 
-    with {:ok, code, client} <- consume_code(server, params, opts),
+    with {:ok, presented_client_id, canonical_client_id} <-
+           resolve_client_id(server, params, opts),
+         {:ok, code, client} <- consume_code(server, params, canonical_client_id, opts),
          :ok <- verify_pkce(code, params),
          :ok <- check_resource_match(server, params, code, secret_context),
          :ok <- check_redirect_match(params, code),
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
+             # The claim carries the identifier the client authenticates
+             # as — for CIMD clients that's their URL, not our row id.
              sub: code.user_id,
-             client_id: client.id,
+             client_id: presented_client_id,
              scope: code.scope,
              tenant: tenant
            ),
@@ -86,7 +90,28 @@ defmodule AshAuthentication.Oauth2Server.Token do
   defp secret_context(nil), do: %{}
   defp secret_context(tenant), do: %{tenant: tenant}
 
-  defp consume_code(server, %{"code" => code_id, "client_id" => client_id}, opts)
+  # Map the presented `client_id` param to the id stored on codes /
+  # refresh rows. Ordinary client_ids pass through unchanged; URL-shaped
+  # ones (Client ID Metadata Documents) resolve to the client row that was
+  # upserted at authorize time — a database lookup only, never a fetch.
+  # Returns `{:ok, presented, canonical}`.
+  defp resolve_client_id(server, %{"client_id" => "https://" <> _ = url}, opts) do
+    with true <- server.cimd_enabled?(),
+         {:ok, client} <- CIMD.find_client(server, url, opts) do
+      {:ok, url, client.id}
+    else
+      _ -> {:error, :client_mismatch}
+    end
+  end
+
+  defp resolve_client_id(_server, %{"client_id" => client_id}, _opts)
+       when is_binary(client_id) and client_id != "" do
+    {:ok, client_id, client_id}
+  end
+
+  defp resolve_client_id(_server, _params, _opts), do: {:error, :invalid_request}
+
+  defp consume_code(server, %{"code" => code_id}, client_id, opts)
        when is_binary(code_id) and is_binary(client_id) do
     with {:ok, code} <-
            code_or_error(Ash.get(server.authorization_code_resource(), code_id, ash_opts(opts))),
@@ -104,7 +129,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  defp consume_code(_, _, _), do: {:error, :invalid_request}
+  defp consume_code(_, _, _, _), do: {:error, :invalid_request}
 
   defp code_or_error({:ok, _} = ok), do: ok
   defp code_or_error({:error, _}), do: {:error, :invalid_code}
@@ -178,10 +203,18 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   def exchange_refresh_token(
         server,
-        %{"refresh_token" => raw, "client_id" => client_id} = params,
+        %{"refresh_token" => raw, "client_id" => _} = params,
         opts
       )
       when is_binary(raw) do
+    with {:ok, presented_client_id, client_id} <- resolve_client_id(server, params, opts) do
+      do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts)
+    end
+  end
+
+  def exchange_refresh_token(_, _, _), do: {:error, :invalid_request}
+
+  defp do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts) do
     hash = hash_refresh(raw)
     resource = Map.get(params, "resource")
     expected_resource = server.resource_url(secret_context(Keyword.get(opts, :tenant)))
@@ -194,7 +227,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
     case atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
       {:ok, old_row} ->
-        complete_rotation(server, old_row, new_id, new_hash, new_raw, opts)
+        complete_rotation(server, old_row, presented_client_id, new_id, new_hash, new_raw, opts)
 
       :no_match ->
         case disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
@@ -216,8 +249,6 @@ defmodule AshAuthentication.Oauth2Server.Token do
         {:error, :invalid_refresh}
     end
   end
-
-  def exchange_refresh_token(_, _, _), do: {:error, :invalid_request}
 
   # The bulk update's filter holds every "is this refresh usable" check
   # in one place — client/resource/expiry/rotation/revocation — so the
@@ -261,7 +292,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  defp complete_rotation(server, old_row, new_id, new_hash, new_raw, opts) do
+  defp complete_rotation(server, old_row, presented_client_id, new_id, new_hash, new_raw, opts) do
     tenant = Keyword.get(opts, :tenant)
 
     new_expires_at =
@@ -287,7 +318,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
              sub: old_row.user_id,
-             client_id: old_row.client_id,
+             client_id: presented_client_id,
              scope: old_row.scope,
              tenant: tenant
            ) do
@@ -348,12 +379,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
   @spec revoke(server :: module(), params :: map(), opts()) :: :ok
   def revoke(server, params, opts \\ [])
 
-  def revoke(server, %{"token" => raw, "client_id" => client_id}, opts)
-      when is_binary(raw) and raw != "" and is_binary(client_id) and client_id != "" do
+  def revoke(server, %{"token" => raw, "client_id" => presented} = params, opts)
+      when is_binary(raw) and raw != "" and is_binary(presented) and presented != "" do
     hash = hash_refresh(raw)
 
-    case find_refresh(server, hash, opts) do
-      {:ok, %{client_id: ^client_id} = row} -> revoke_chain_by_id(server, row.chain_id, opts)
+    with {:ok, _presented, client_id} <- resolve_client_id(server, params, opts),
+         {:ok, %{client_id: ^client_id} = row} <- find_refresh(server, hash, opts) do
+      revoke_chain_by_id(server, row.chain_id, opts)
+    else
+      # RFC 7009 §2.2 — never leak whether the token (or client) existed.
       _ -> :ok
     end
 

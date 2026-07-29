@@ -36,6 +36,7 @@ defmodule Oauth2ServerTest.OAuthClient do
     attribute :response_types, {:array, :string}, public?: true, default: ["code"]
     attribute :token_endpoint_auth_method, :string, public?: true, default: "none"
     attribute :scope, :string, public?: true, default: "mcp"
+    attribute :cimd_url, :string, public?: true
     attribute :last_used_at, :utc_datetime_usec, public?: true
     create_timestamp :inserted_at
     update_timestamp :updated_at
@@ -55,10 +56,29 @@ defmodule Oauth2ServerTest.OAuthClient do
       ]
     end
 
+    create :register_cimd do
+      upsert? true
+      upsert_identity :by_cimd_url
+
+      accept [
+        :cimd_url,
+        :client_name,
+        :redirect_uris,
+        :grant_types,
+        :response_types,
+        :token_endpoint_auth_method,
+        :scope
+      ]
+    end
+
     update :touch do
       accept []
       change atomic_update(:last_used_at, expr(now()))
     end
+  end
+
+  identities do
+    identity :by_cimd_url, [:cimd_url], pre_check_with: Oauth2ServerTest.Domain
   end
 end
 
@@ -315,6 +335,69 @@ defmodule Oauth2ServerTest.UnenforcedScopesServer do
     scopes: ["mcp"],
     enforce_scopes?: false,
     dcr_enabled?: true
+end
+
+defmodule Oauth2ServerTest.StubFetcher do
+  @moduledoc """
+  Test fetcher for Client ID Metadata Documents — no network. Tests
+  register canned responses per URL with `stub/2` (application env, so it
+  works across the router's plug pipeline too).
+  """
+
+  @behaviour AshAuthentication.Oauth2Server.CIMD.Fetcher
+
+  @env_key :cimd_stub_documents
+
+  @doc "Register a canned response for `url`."
+  def stub(url, response) do
+    stubs = Application.get_env(:ash_authentication_oauth2_server, @env_key, %{})
+
+    Application.put_env(
+      :ash_authentication_oauth2_server,
+      @env_key,
+      Map.put(stubs, url, response)
+    )
+  end
+
+  @doc "Remove all canned responses."
+  def clear do
+    Application.delete_env(:ash_authentication_oauth2_server, @env_key)
+  end
+
+  @impl true
+  def fetch(url, _opts) do
+    :ash_authentication_oauth2_server
+    |> Application.get_env(@env_key, %{})
+    |> Map.get(url)
+    |> case do
+      nil -> {:error, :not_stubbed}
+      {:error, _} = error -> error
+      document when is_map(document) -> {:ok, %{document: document, cache_ttl: 0}}
+    end
+  end
+end
+
+defmodule Oauth2ServerTest.CimdServer do
+  @moduledoc """
+  Identical to `Oauth2ServerTest.Server` but with Client ID Metadata
+  Documents enabled, resolving documents through the no-network
+  `Oauth2ServerTest.StubFetcher`.
+  """
+
+  use AshAuthentication.Oauth2Server,
+    otp_app: :ash_authentication_oauth2_server,
+    user_resource: Oauth2ServerTest.User,
+    issuer_url: {Oauth2ServerTest.Secrets, []},
+    resource_url: {Oauth2ServerTest.Secrets, []},
+    signing_secret: {Oauth2ServerTest.Secrets, []},
+    client_resource: Oauth2ServerTest.OAuthClient,
+    authorization_code_resource: Oauth2ServerTest.OAuthAuthorizationCode,
+    refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
+    consent_resource: Oauth2ServerTest.OAuthConsent,
+    scopes: ["mcp"],
+    dcr_enabled?: true,
+    cimd_enabled?: true,
+    cimd_fetcher: Oauth2ServerTest.StubFetcher
 end
 
 defmodule Oauth2ServerTest.ScopeProvider do

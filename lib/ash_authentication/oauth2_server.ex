@@ -44,6 +44,9 @@ defmodule AshAuthentication.Oauth2Server do
   | `:clock_skew_seconds` | `30` | Tolerance applied to `exp` and `nbf` JWT claim checks. Allows for small clock differences between the AS and resource server. RFC 7519 §4.1.4 — "MAY provide for some small leeway, usually no more than a few minutes." |
   | `:dcr_enabled?` | `false` | Enable dynamic client registration (RFC 7591) at `POST /oauth/register`. Off by default — the safer posture for first-party-only apps. Turn on if you're hosting clients that self-register (MCP, ChatGPT Apps SDK, Claude.ai connectors). When off, the route 404s and the metadata document omits `registration_endpoint`. |
   | `:dcr_always_return_client_secret?` | `false` | Workaround for clients that misbehave when `client_secret` is absent for `auth_method: none`. See https://community.openai.com/t/1366118 |
+  | `:cimd_enabled?` | `false` | Accept HTTPS URLs as `client_id`s per the OAuth Client ID Metadata Documents draft — the registration mechanism the MCP spec (2026-07-28) recommends over DCR. Requires CIMD support on your client resource and (for the default fetcher) the optional `req` dependency. See `AshAuthentication.Oauth2Server.CIMD`. When on, the metadata document advertises `client_id_metadata_document_supported: true`. |
+  | `:cimd_fetcher` | `AshAuthentication.Oauth2Server.CIMD.ReqFetcher` | Module implementing `AshAuthentication.Oauth2Server.CIMD.Fetcher` used to retrieve client metadata documents. Swap for a custom outbound policy or a test stub. |
+  | `:cimd_fetch_options` | `[]` | Keyword options passed to the fetcher's `fetch/2` — see `AshAuthentication.Oauth2Server.CIMD.ReqFetcher` for the default fetcher's options. |
   | `:sign_in_path` | `nil` | Path to redirect unauthenticated `/oauth/authorize` requests to. When `nil`, returns 401. |
   | `:initial_access_token` | `nil` | When set, `POST /oauth/register` requires the request to present a matching `Authorization: Bearer …` token (RFC 7591 §3). When `nil` (default), dynamic client registration is open — see the trust-model note below. |
 
@@ -147,6 +150,9 @@ defmodule AshAuthentication.Oauth2Server do
       clock_skew_seconds: 30,
       dcr_enabled?: false,
       dcr_always_return_client_secret?: false,
+      cimd_enabled?: false,
+      cimd_fetcher: AshAuthentication.Oauth2Server.CIMD.ReqFetcher,
+      cimd_fetch_options: [],
       sign_in_path: nil,
       initial_access_token: nil
     ]
@@ -185,6 +191,10 @@ defmodule AshAuthentication.Oauth2Server do
 
       def dcr_always_return_client_secret?,
         do: Keyword.fetch!(@oauth2_server_opts, :dcr_always_return_client_secret?)
+
+      def cimd_enabled?, do: Keyword.fetch!(@oauth2_server_opts, :cimd_enabled?)
+      def cimd_fetcher, do: Keyword.fetch!(@oauth2_server_opts, :cimd_fetcher)
+      def cimd_fetch_options, do: Keyword.fetch!(@oauth2_server_opts, :cimd_fetch_options)
 
       def access_token_lifetime,
         do: Oauth2Server.__lifetime_seconds__(@oauth2_server_opts[:access_token_lifetime])

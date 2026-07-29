@@ -50,53 +50,46 @@ permissions inside your app.
 That means: don't pre-compute scope-derived permissions onto the user
 record. Read scopes from the conn (or context) at the point of action.
 
-## Pattern 1: a `RequireScope` plug
+## Pattern 1: the `RequireScopePlug`
 
-Cheapest gating — return 403 in the pipeline before the request reaches
-the controller:
-
-```elixir
-defmodule MyAppWeb.RequireScope do
-  @behaviour Plug
-  import Plug.Conn
-
-  @impl true
-  def init(scope) when is_binary(scope), do: scope
-
-  @impl true
-  def call(conn, scope) do
-    scopes =
-      conn.assigns
-      |> Map.get(:oauth_claims, %{})
-      |> Map.get("scope", "")
-      |> String.split(" ", trim: true)
-
-    if scope in scopes do
-      conn
-    else
-      conn |> send_resp(403, "") |> halt()
-    end
-  end
-end
-```
-
-Mount it in your pipeline after `BearerPlug`:
+Cheapest gating — reject in the pipeline before the request reaches the
+controller. The library ships
+`AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug`, which
+responds with the RFC 6750 §3.1 `insufficient_scope` shape (`403` +
+`WWW-Authenticate: Bearer error="insufficient_scope", scope="…",
+resource_metadata="…"`) so step-up-capable clients — including MCP
+clients following the 2026-07-28 spec — know exactly which scopes to
+re-authorize with:
 
 ```elixir
 pipeline :mcp_read do
   plug AshAuthentication.Phoenix.Oauth2Server.BearerPlug,
-    oauth2_server: MyApp.Oauth2Server
-  plug MyAppWeb.RequireScope, "mcp.read"
+    oauth2_server: MyApp.Oauth2Server,
+    # optional: advertise required scopes on the initial 401 challenge
+    scope: "mcp.read"
+
+  plug AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug,
+    oauth2_server: MyApp.Oauth2Server,
+    scope: "mcp.read"
 end
 
 pipeline :mcp_write do
   plug AshAuthentication.Phoenix.Oauth2Server.BearerPlug,
-    oauth2_server: MyApp.Oauth2Server
-  plug MyAppWeb.RequireScope, "mcp.write"
+    oauth2_server: MyApp.Oauth2Server,
+    scope: "mcp.write"
+
+  plug AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug,
+    oauth2_server: MyApp.Oauth2Server,
+    scope: "mcp.write"
 end
 ```
 
-Good when scope-to-route mapping is fixed.
+Good when scope-to-route mapping is fixed. For dynamic per-request
+scope requirements, call
+`AshAuthentication.Phoenix.Oauth2Server.Errors.send_insufficient_scope/4`
+from your controller with all the scopes the operation needs (emit them
+in a single challenge — incremental challenges force one authorization
+round-trip per scope).
 
 ## Pattern 2: Scopes in Ash policies
 

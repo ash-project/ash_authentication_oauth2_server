@@ -70,7 +70,8 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       extra_section: "GUIDES",
       extras: [
         {"README.md", title: "Home"},
-        "documentation/topics/scopes.md"
+        "documentation/topics/scopes.md",
+        "documentation/topics/client-id-metadata-documents.md"
       ],
       groups_for_extras: [
         Topics: ~r'documentation/topics'
@@ -101,6 +102,9 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       {:plug, "~> 1.14"},
       {:jason, "~> 1.0"},
       {:joken, "~> 2.0"},
+      # Used by the default Client ID Metadata Document fetcher; only
+      # needed when `cimd_enabled?: true` with the default `:cimd_fetcher`.
+      {:req, "~> 0.5", optional: true},
       # Dev / test
       {:ash_phoenix, "~> 2.3 and >= 2.3.11", only: [:dev, :test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},

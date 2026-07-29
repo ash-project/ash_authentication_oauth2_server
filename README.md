@@ -13,13 +13,18 @@ user-login side and runs on Phoenix.
 ## What this gives you
 
 * OAuth 2.1 `/authorize` + `/token` flow with PKCE-only (RFC 9700)
+* Client ID Metadata Documents (CIMD) — opt-in URL-based client
+  identity, the registration mechanism the MCP 2026-07-28 spec
+  recommends, with an SSRF-hardened document fetcher
 * Dynamic Client Registration (RFC 7591) — opt-in, with optional
   initial-access-token gating
 * Audience-bound access tokens (RFC 8707)
+* Issuer identification on authorization responses (RFC 9207)
 * Refresh-token rotation with reuse detection
 * Discovery metadata (RFC 8414 + RFC 9728) + `/.well-known/openid-configuration`
 * User-driven consent screen with override-friendly UI
-* Bearer plug for protected resource endpoints
+* Bearer plug for protected resource endpoints, plus a scope-gate plug
+  that emits step-up-friendly `insufficient_scope` challenges (RFC 6750)
 * Designed to host Model Context Protocol (MCP) servers, ChatGPT Apps
   SDK connectors, Claude.ai integrations, etc.
 

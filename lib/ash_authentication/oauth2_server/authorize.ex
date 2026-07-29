@@ -21,6 +21,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   require Ash.Query
 
   alias AshAuthentication.Oauth2Server
+  alias AshAuthentication.Oauth2Server.CIMD
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -199,6 +200,19 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     end
   end
 
+  # A URL-shaped client_id is a Client ID Metadata Document reference —
+  # resolve it (fetch + validate + upsert) when CIMD is enabled.
+  defp load_client(server, %{"client_id" => "https://" <> _ = url}, opts) do
+    if server.cimd_enabled?() do
+      case CIMD.resolve_client(server, url, opts) do
+        {:ok, client} -> {:ok, client}
+        {:error, description} -> {:error, "invalid_client", description}
+      end
+    else
+      {:error, "invalid_client", "URL client_ids are not supported by this server"}
+    end
+  end
+
   defp load_client(server, %{"client_id" => id}, opts) do
     case Ash.get(server.client_resource(), id, ash_opts(opts)) do
       {:ok, client} -> {:ok, client}
@@ -211,13 +225,38 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
   # RFC 9700 §4.1 — exact byte-equal match. No normalization, no
   # default-port elision, no trailing-slash equivalence. The client MUST
-  # use the same redirect URI string it registered with.
+  # use the same redirect URI string it registered with — with the one
+  # exception RFC 9700 inherits from RFC 8252 §7.3: for loopback IP
+  # literal redirects (`127.0.0.1` / `[::1]`), the port MUST be allowed
+  # to vary, because native and CLI clients bind an ephemeral port at
+  # authorization time and (particularly with CIMD) cannot register it
+  # in advance. The exception is host-literal only; `localhost` does not
+  # qualify.
   defp check_redirect_uri(%{"redirect_uri" => uri}, %{redirect_uris: uris})
        when is_binary(uri) and is_list(uris) do
-    if uri in uris, do: :ok, else: {:error, :bad_redirect_uri}
+    if Enum.any?(uris, &redirect_uri_match?(uri, &1)) do
+      :ok
+    else
+      {:error, :bad_redirect_uri}
+    end
   end
 
   defp check_redirect_uri(_, _), do: {:error, :bad_redirect_uri}
+
+  @loopback_hosts ["127.0.0.1", "::1"]
+
+  defp redirect_uri_match?(uri, uri), do: true
+
+  defp redirect_uri_match?(presented, registered) do
+    presented = URI.parse(presented)
+    registered = URI.parse(registered)
+
+    presented.host in @loopback_hosts and
+      registered.host == presented.host and
+      registered.scheme == presented.scheme and
+      registered.path == presented.path and
+      registered.query == presented.query
+  end
 
   # When `enforce_scopes?` is true (the default), every requested scope
   # must be in the server's advertised catalogue. When false, scopes are

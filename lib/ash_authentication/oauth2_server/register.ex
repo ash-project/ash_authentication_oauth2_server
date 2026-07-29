@@ -19,11 +19,9 @@ defmodule AshAuthentication.Oauth2Server.Register do
   bypass (set by the installer) rather than `authorize?: false`.
   """
 
-  @ash_context %{private: %{ash_authentication?: true}}
+  alias AshAuthentication.Oauth2Server.ClientMetadata
 
-  @valid_grant_types ~w(authorization_code refresh_token)
-  @valid_response_types ~w(code)
-  @valid_auth_methods ~w(none)
+  @ash_context %{private: %{ash_authentication?: true}}
 
   @doc """
   Register a new OAuth client from RFC 7591-shaped parameters.
@@ -57,11 +55,11 @@ defmodule AshAuthentication.Oauth2Server.Register do
   def register(server, params, opts \\ []) do
     with :ok <- check_dcr_enabled(server),
          :ok <- check_initial_access_token(server, opts),
-         :ok <- validate_redirect_uris(params),
+         :ok <- ClientMetadata.validate_redirect_uris(params),
          :ok <- validate_client_name(params),
-         :ok <- validate_grant_types(params),
-         :ok <- validate_response_types(params),
-         :ok <- validate_auth_method(params),
+         :ok <- ClientMetadata.validate_grant_types(params),
+         :ok <- ClientMetadata.validate_response_types(params),
+         :ok <- ClientMetadata.validate_auth_method(params),
          {:ok, client} <- create_client(server, params, opts) do
       {:ok, client, response_body(server, client)}
     else
@@ -90,28 +88,6 @@ defmodule AshAuthentication.Oauth2Server.Register do
     end
   end
 
-  defp validate_redirect_uris(%{"redirect_uris" => uris}) when is_list(uris) and uris != [] do
-    Enum.reduce_while(uris, :ok, fn uri, _ ->
-      case URI.new(uri) do
-        {:ok, %URI{scheme: "https", host: host, fragment: nil}}
-        when is_binary(host) and host != "" ->
-          {:cont, :ok}
-
-        {:ok, %URI{scheme: "http", host: host, fragment: nil}}
-        when host in ["localhost", "127.0.0.1", "::1"] ->
-          {:cont, :ok}
-
-        _ ->
-          {:halt,
-           {:error, "invalid_redirect_uri",
-            "redirect URIs must use https (or http localhost), have a host, and no fragment"}}
-      end
-    end)
-  end
-
-  defp validate_redirect_uris(_),
-    do: {:error, "invalid_client_metadata", "redirect_uris is required"}
-
   # `client_name` is optional in RFC 7591. When present, must be a string;
   # we don't impose length limits but reject obviously bogus shapes so they
   # turn into a clean DCR error rather than a 500 in the changeset.
@@ -122,35 +98,11 @@ defmodule AshAuthentication.Oauth2Server.Register do
 
   defp validate_client_name(_), do: :ok
 
-  defp validate_grant_types(%{"grant_types" => grants}) when is_list(grants) do
-    if Enum.all?(grants, &(&1 in @valid_grant_types)),
-      do: :ok,
-      else: {:error, "invalid_client_metadata", "unsupported grant_type"}
-  end
-
-  defp validate_grant_types(_), do: :ok
-
-  defp validate_response_types(%{"response_types" => types}) when is_list(types) do
-    if Enum.all?(types, &(&1 in @valid_response_types)),
-      do: :ok,
-      else: {:error, "invalid_client_metadata", "unsupported response_type"}
-  end
-
-  defp validate_response_types(_), do: :ok
-
-  defp validate_auth_method(%{"token_endpoint_auth_method" => m}) when m in @valid_auth_methods,
-    do: :ok
-
-  defp validate_auth_method(%{"token_endpoint_auth_method" => _}),
-    do: {:error, "invalid_client_metadata", "unsupported token_endpoint_auth_method"}
-
-  defp validate_auth_method(_), do: :ok
-
   defp create_client(server, params, opts) do
     attrs = %{
       client_name: Map.get(params, "client_name", "Unnamed Client"),
       redirect_uris: Map.fetch!(params, "redirect_uris"),
-      grant_types: Map.get(params, "grant_types", ["authorization_code"]),
+      grant_types: ClientMetadata.narrow_grant_types(params),
       response_types: Map.get(params, "response_types", ["code"]),
       token_endpoint_auth_method: Map.get(params, "token_endpoint_auth_method", "none"),
       scope: Enum.join(server.scopes(), " ")

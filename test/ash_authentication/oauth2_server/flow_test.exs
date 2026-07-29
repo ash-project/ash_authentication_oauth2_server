@@ -210,6 +210,28 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:ok, _} = Authorize.validate_request(Server, params)
     end
 
+    test "loopback IP literal redirects match with any port (RFC 8252 §7.3)" do
+      {client, _} = register_client("http://127.0.0.1:6274/callback")
+      {_, challenge} = pkce_pair()
+
+      # Same loopback host/scheme/path, different (ephemeral) port — allowed.
+      params = authorize_params(client, challenge, "http://127.0.0.1:50163/callback")
+      assert {:ok, _} = Authorize.validate_request(Server, params)
+
+      # Everything else about the URI must still match exactly.
+      for incoming <- [
+            # different path
+            "http://127.0.0.1:50163/other",
+            # different scheme
+            "https://127.0.0.1:50163/callback",
+            # `localhost` does not qualify for the loopback exception
+            "http://localhost:50163/callback"
+          ] do
+        params = authorize_params(client, challenge, incoming)
+        assert {:error, :bad_redirect_uri} = Authorize.validate_request(Server, params)
+      end
+    end
+
     test "accepts a scope that's a subset of the server's catalogue" do
       # Server is configured with scopes: ["mcp"]; requesting "mcp" alone is fine.
       {client, _} = register_client()

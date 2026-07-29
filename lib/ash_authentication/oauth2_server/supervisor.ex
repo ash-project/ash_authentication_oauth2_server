@@ -41,10 +41,15 @@ defmodule AshAuthentication.Oauth2Server.Supervisor do
       expired authorization codes and refresh tokens from any resource
       extended with `AshAuthentication.Oauth2Server.AuthorizationCodeResource`
       or `AshAuthentication.Oauth2Server.RefreshTokenResource`.
+    * `AshAuthentication.Oauth2Server.CIMD.Cache` — the cache for fetched
+      Client ID Metadata Documents. Harmless when CIMD is disabled; when
+      CIMD is enabled but this supervisor isn't running, resolution still
+      works but every authorize request re-fetches the document.
   """
 
   use Supervisor
 
+  alias AshAuthentication.Oauth2Server.CIMD
   alias AshAuthentication.Oauth2Server.Expunger
 
   @doc false
@@ -59,7 +64,8 @@ defmodule AshAuthentication.Oauth2Server.Supervisor do
     expunger_opts = Keyword.take(opts, [:list_tenants]) |> Keyword.put(:otp_app, otp_app)
 
     children = [
-      {Expunger, expunger_opts}
+      {Expunger, expunger_opts},
+      {CIMD.Cache, []}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

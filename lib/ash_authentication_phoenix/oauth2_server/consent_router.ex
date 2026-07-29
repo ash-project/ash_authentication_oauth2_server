@@ -24,7 +24,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   use Plug.Router, copy_opts_to_assign: :oauth2_server_router_opts
 
   alias AshAuthentication.Oauth2Server
-  alias AshAuthentication.Oauth2Server.Authorize
+  alias AshAuthentication.Oauth2Server.{Authorize, CIMD}
   alias AshAuthentication.Phoenix.Oauth2Server.{ConsentView, Errors}
 
   @max_state_bytes 2048
@@ -112,6 +112,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
         "deny" ->
           redirect_with_oauth_error(
             conn,
+            server,
             validated.redirect_uri,
             validated.state,
             "access_denied",
@@ -145,7 +146,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
 
     location =
       validated.redirect_uri <>
-        "?" <> URI.encode_query(%{"code" => code.id, "state" => validated.state})
+        "?" <>
+        URI.encode_query(%{
+          "code" => code.id,
+          "state" => validated.state,
+          # RFC 9207 — identify the issuer in the authorization response
+          # so the client can detect authorization-server mix-up attacks.
+          "iss" => issuer(conn, server)
+        })
 
     conn
     |> put_resp_header("location", location)
@@ -163,16 +171,24 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   defp handle_authorize_error(conn, server, params, code, desc) do
     case safe_redirect_uri(server, params, conn) do
       {:ok, redirect_uri} ->
-        redirect_with_oauth_error(conn, redirect_uri, Map.get(params, "state"), code, desc)
+        redirect_with_oauth_error(
+          conn,
+          server,
+          redirect_uri,
+          Map.get(params, "state"),
+          code,
+          desc
+        )
 
       :error ->
         Errors.send_oauth_error(conn, 400, code, desc)
     end
   end
 
-  defp redirect_with_oauth_error(conn, redirect_uri, state, code, desc) do
+  # RFC 9207 §2 requires `iss` on error responses too.
+  defp redirect_with_oauth_error(conn, server, redirect_uri, state, code, desc) do
     query =
-      %{"error" => code}
+      %{"error" => code, "iss" => issuer(conn, server)}
       |> maybe_put_param("error_description", desc)
       |> maybe_put_param("state", state)
 
@@ -182,17 +198,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     |> halt()
   end
 
+  defp issuer(conn, server) do
+    case Ash.PlugHelpers.get_tenant(conn) do
+      nil -> server.issuer_url()
+      tenant -> server.issuer_url(%{tenant: tenant})
+    end
+  end
+
   defp maybe_put_param(map, _key, nil), do: map
   defp maybe_put_param(map, _key, ""), do: map
   defp maybe_put_param(map, key, value), do: Map.put(map, key, value)
 
   defp safe_redirect_uri(server, %{"client_id" => client_id, "redirect_uri" => uri}, conn)
        when is_binary(client_id) and is_binary(uri) and client_id != "" and uri != "" do
-    opts =
-      [context: %{private: %{ash_authentication?: true}}]
-      |> Keyword.merge(tenant_opts(conn))
-
-    with {:ok, client} <- Ash.get(server.client_resource(), client_id, opts),
+    with {:ok, client} <- lookup_client(server, client_id, conn),
          registered when is_list(registered) <- Map.get(client, :redirect_uris) do
       normalized = Oauth2Server.__normalize_url__(uri)
       registered_normalized = Enum.map(registered, &Oauth2Server.__normalize_url__/1)
@@ -203,6 +222,29 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   end
 
   defp safe_redirect_uri(_server, _params, _conn), do: :error
+
+  # CIMD client_ids resolve from the database only here — this runs on the
+  # *error* path, where triggering an outbound fetch would be a free SSRF
+  # lever. A CIMD client we've never successfully resolved gets the direct
+  # 400 page instead of a redirect, which is the safe fallback anyway.
+  defp lookup_client(server, "https://" <> _ = url, conn) do
+    if server.cimd_enabled?() do
+      case CIMD.find_client(server, url, tenant_opts(conn)) do
+        {:ok, client} -> {:ok, client}
+        :error -> :error
+      end
+    else
+      :error
+    end
+  end
+
+  defp lookup_client(server, client_id, conn) do
+    opts =
+      [context: %{private: %{ash_authentication?: true}}]
+      |> Keyword.merge(tenant_opts(conn))
+
+    Ash.get(server.client_resource(), client_id, opts)
+  end
 
   defp tenant_opts(conn) do
     case Ash.PlugHelpers.get_tenant(conn) do
