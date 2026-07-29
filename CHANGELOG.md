@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.3.0](https://github.com/ash-project/ash_authentication_oauth2_server/compare/v0.2.2...v0.3.0) (2026-07-29)
+
+
+
+
+### Features:
+
+* support Client ID Metadata Documents, RFC 9207 iss, and insufficient_scope challenges by [@zachdaniel](https://github.com/zachdaniel)
+
 ## [v0.2.2](https://github.com/ash-project/ash_authentication_oauth2_server/compare/v0.2.1...v0.2.2) (2026-05-31)
 
 
