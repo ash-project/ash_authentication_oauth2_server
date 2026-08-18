@@ -226,12 +226,21 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   # RFC 9700 §4.1 — exact byte-equal match. No normalization, no
   # default-port elision, no trailing-slash equivalence. The client MUST
   # use the same redirect URI string it registered with — with the one
-  # exception RFC 9700 inherits from RFC 8252 §7.3: for loopback IP
-  # literal redirects (`127.0.0.1` / `[::1]`), the port MUST be allowed
-  # to vary, because native and CLI clients bind an ephemeral port at
-  # authorization time and (particularly with CIMD) cannot register it
-  # in advance. The exception is host-literal only; `localhost` does not
-  # qualify.
+  # exception RFC 9700 inherits from RFC 8252 §7.3: for loopback
+  # redirects, the port MUST be allowed to vary, because native and CLI
+  # clients bind an ephemeral port at authorization time and
+  # (particularly with CIMD) cannot register it in advance.
+  #
+  # RFC 8252 §7.3 phrases the exception in terms of "http://127.0.0.1"
+  # (and by extension "::1"), and a strict reading excludes the
+  # `localhost` hostname since its resolution isn't guaranteed to stay
+  # loopback. In practice several real-world native/CLI OAuth clients
+  # (Claude Code among them) always redirect to `localhost` and never
+  # fall back to the IP literal, even when their own client metadata
+  # advertises support for both — so excluding it breaks interop with
+  # them entirely. We include `localhost` here too, accepting the same
+  # theoretical, local-machine-only risk the IP-literal exception
+  # already accepts.
   defp check_redirect_uri(%{"redirect_uri" => uri}, %{redirect_uris: uris})
        when is_binary(uri) and is_list(uris) do
     if Enum.any?(uris, &redirect_uri_match?(uri, &1)) do
@@ -243,7 +252,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
   defp check_redirect_uri(_, _), do: {:error, :bad_redirect_uri}
 
-  @loopback_hosts ["127.0.0.1", "::1"]
+  @loopback_hosts ["127.0.0.1", "::1", "localhost"]
 
   defp redirect_uri_match?(uri, uri), do: true
 
