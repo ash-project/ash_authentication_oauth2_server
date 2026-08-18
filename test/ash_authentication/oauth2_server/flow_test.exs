@@ -224,8 +224,28 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
             "http://127.0.0.1:50163/other",
             # different scheme
             "https://127.0.0.1:50163/callback",
-            # `localhost` does not qualify for the loopback exception
+            # different loopback host — no cross-host matching
             "http://localhost:50163/callback"
+          ] do
+        params = authorize_params(client, challenge, incoming)
+        assert {:error, :bad_redirect_uri} = Authorize.validate_request(Server, params)
+      end
+    end
+
+    test "loopback `localhost` redirects match with any port too" do
+      # Several real-world native/CLI OAuth clients (e.g. Claude Code)
+      # always redirect to `localhost`, never the IP literal, even when
+      # their own client metadata advertises support for both.
+      {client, _} = register_client("http://localhost:6274/callback")
+      {_, challenge} = pkce_pair()
+
+      params = authorize_params(client, challenge, "http://localhost:50163/callback")
+      assert {:ok, _} = Authorize.validate_request(Server, params)
+
+      for incoming <- [
+            "http://localhost:50163/other",
+            "https://localhost:50163/callback",
+            "http://127.0.0.1:50163/callback"
           ] do
         params = authorize_params(client, challenge, incoming)
         assert {:error, :bad_redirect_uri} = Authorize.validate_request(Server, params)
