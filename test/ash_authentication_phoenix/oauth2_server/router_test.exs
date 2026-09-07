@@ -103,6 +103,26 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
     end
   end
 
+  describe "ProtocolRouter: metadata cache-control is tenant-aware" do
+    for path <- ["/oauth-authorization-server", "/oauth-protected-resource"] do
+      test "#{path} is publicly cacheable without a tenant" do
+        conn = call_protocol(conn(:get, unquote(path)))
+        assert get_resp_header(conn, "cache-control") == ["public, max-age=3600"]
+      end
+
+      test "#{path} is private (not shared-cacheable) when a tenant is set" do
+        # A tenant-specific response must never be stored by a shared cache,
+        # which would otherwise serve one tenant's endpoints to another.
+        conn =
+          conn(:get, unquote(path))
+          |> Ash.PlugHelpers.set_tenant("tenant-a")
+          |> call_protocol()
+
+        assert get_resp_header(conn, "cache-control") == ["private, max-age=3600"]
+      end
+    end
+  end
+
   describe "ProtocolRouter: POST /register" do
     test "registers a client and returns 201 + RFC 7591 body" do
       conn = register_client()

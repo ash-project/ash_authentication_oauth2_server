@@ -49,7 +49,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
 
     conn
     |> put_resp_header("content-type", "application/json")
-    |> put_resp_header("cache-control", "public, max-age=3600")
+    |> put_resp_header("cache-control", metadata_cache_control(conn))
     |> send_resp(200, Jason.encode!(Metadata.protected_resource(server, secret_context(conn))))
     |> halt()
   end
@@ -169,7 +169,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
 
     conn
     |> put_resp_header("content-type", "application/json")
-    |> put_resp_header("cache-control", "public, max-age=3600")
+    |> put_resp_header("cache-control", metadata_cache_control(conn))
     |> send_resp(
       200,
       Jason.encode!(Metadata.authorization_server(server, secret_context(conn)))
@@ -181,6 +181,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     case Ash.PlugHelpers.get_tenant(conn) do
       nil -> %{}
       tenant -> %{tenant: tenant}
+    end
+  end
+
+  # Metadata (issuer, token_endpoint, jwks_uri, …) is tenant-specific when a
+  # tenant is set on the conn. The tenant is often derived from outside the URL
+  # (a request header or the host), so a shared cache keyed on the URL alone
+  # would hand one tenant's endpoints to another. We can't emit a correct `Vary`
+  # (the selector is app-specific), so tenant-specific responses are marked
+  # `private` — never stored by shared caches. Tenant-independent responses stay
+  # publicly cacheable.
+  defp metadata_cache_control(conn) do
+    case Ash.PlugHelpers.get_tenant(conn) do
+      nil -> "public, max-age=3600"
+      _ -> "private, max-age=3600"
     end
   end
 
