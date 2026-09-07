@@ -271,4 +271,31 @@ defmodule AshAuthentication.Oauth2Server.SmokeTest do
       assert Enum.all?(rest, &(&1 == first))
     end
   end
+
+  describe "secret resolution fails closed" do
+    defmodule NilSecret do
+      def get(_path, _module), do: nil
+    end
+
+    test "a configured provider that yields nil/false/empty/error raises instead of resolving" do
+      for provider <- [
+            fn _path, _module -> nil end,
+            fn _path, _module -> false end,
+            fn _path, _module -> "" end,
+            fn _path, _module -> {:error, :unset} end,
+            {NilSecret, :get, []}
+          ] do
+        assert_raise RuntimeError, ~r/failed to resolve secret/, fn ->
+          Oauth2Server.__resolve_secret__!(provider, TestServer, [:initial_access_token])
+        end
+      end
+    end
+
+    test "a non-empty binary (bare or {:ok, _}) still resolves" do
+      assert Oauth2Server.__resolve_secret__!(fn _p, _m -> "tok" end, TestServer, [:x]) == "tok"
+
+      assert Oauth2Server.__resolve_secret__!(fn _p, _m -> {:ok, "tok"} end, TestServer, [:x]) ==
+               "tok"
+    end
+  end
 end

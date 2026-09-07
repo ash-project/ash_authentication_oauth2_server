@@ -339,23 +339,26 @@ defmodule AshAuthentication.Oauth2Server do
 
   defp resolve_secret({mod, fun, args}, module, path, _context)
        when is_atom(mod) and is_atom(fun) and is_list(args) do
-    case apply(mod, fun, [path, module | args]) do
-      {:ok, value} -> {:ok, value}
-      :error -> :error
-      other -> {:ok, other}
-    end
+    mod |> apply(fun, [path, module | args]) |> normalize_resolved_secret()
   end
 
   defp resolve_secret(fun, module, path, _context) when is_function(fun, 2) do
-    case fun.(path, module) do
-      {:ok, value} -> {:ok, value}
-      :error -> :error
-      other -> {:ok, other}
-    end
+    fun.(path, module) |> normalize_resolved_secret()
   end
 
   defp resolve_secret(other, _module, _path, _context),
     do: {:error, {:invalid_secret, other}}
+
+  # A resolved secret must be a non-empty binary. Treat nil, false, "",
+  # {:error, _}, {:ok, nil} and any non-binary as a resolution failure so that
+  # __resolve_secret__!/4 raises rather than silently accepting it: a
+  # configured-but-failing :initial_access_token provider must not drop the DCR
+  # bearer-token gate, and signing_secret must never resolve to an empty key.
+  defp normalize_resolved_secret({:ok, value}) when is_binary(value) and value != "",
+    do: {:ok, value}
+
+  defp normalize_resolved_secret(value) when is_binary(value) and value != "", do: {:ok, value}
+  defp normalize_resolved_secret(_), do: :error
 
   @doc false
   # Resolve the `:scopes` option, which may be a static list, a 0-arity
