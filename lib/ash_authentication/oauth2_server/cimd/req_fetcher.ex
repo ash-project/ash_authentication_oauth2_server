@@ -153,14 +153,21 @@ defmodule AshAuthentication.Oauth2Server.CIMD.ReqFetcher do
            (a == 255 and b == 255 and c == 255 and d == 255))
   end
 
-  def public_ip?({w1, w2, w3, w4, w5, w6, w7, w8} = ip) do
+  def public_ip?({w1, w2, w3, w4, w5, w6, w7, w8}) do
     cond do
-      # :: and ::1
-      ip in [{0, 0, 0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 1}] ->
-        false
+      # ::/96 — IPv4-compatible (incl. :: and ::1); re-check the embedded IPv4.
+      # `::127.0.0.1` and friends live here, so this must map to the v4 policy
+      # rather than fall through as "public".
+      {w1, w2, w3, w4, w5, w6} == {0, 0, 0, 0, 0, 0} ->
+        public_ip?(embedded_v4(w7, w8))
 
       # ::ffff:a.b.c.d — IPv4-mapped; re-check the embedded IPv4
       {w1, w2, w3, w4, w5} == {0, 0, 0, 0, 0} and w6 == 0xFFFF ->
+        public_ip?(embedded_v4(w7, w8))
+
+      # ::ffff:0:a.b.c.d (::ffff:0:0:0/96) — SIIT IPv4-translated; re-check the
+      # embedded IPv4. Distinct from the mapped form above by w5/w6.
+      {w1, w2, w3, w4} == {0, 0, 0, 0} and w5 == 0xFFFF and w6 == 0 ->
         public_ip?(embedded_v4(w7, w8))
 
       # 64:ff9b::/96 — NAT64; re-check the embedded IPv4
@@ -175,9 +182,10 @@ defmodule AshAuthentication.Oauth2Server.CIMD.ReqFetcher do
       {w1, w2, w3, w4} == {0x100, 0, 0, 0} or {w1, w2} == {0x2001, 0xDB8} ->
         false
 
-      # fc00::/7 unique-local, fe80::/10 link-local, ff00::/8 multicast
+      # fc00::/7 unique-local, fe80::/9 link-local + deprecated site-local
+      # (fec0::/10, RFC 3879), ff00::/8 multicast
       Bitwise.band(w1, 0xFE00) == 0xFC00 or
-        Bitwise.band(w1, 0xFFC0) == 0xFE80 or
+        Bitwise.band(w1, 0xFF80) == 0xFE80 or
           Bitwise.band(w1, 0xFF00) == 0xFF00 ->
         false
 

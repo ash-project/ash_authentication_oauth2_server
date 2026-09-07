@@ -433,6 +433,16 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
             {0, 0, 0, 0, 0, 0xFFFF, 0x7F00, 0x0001},
             # ::ffff:10.0.0.1 (v4-mapped private)
             {0, 0, 0, 0, 0, 0xFFFF, 0x0A00, 0x0001},
+            # ::127.0.0.1 (v4-compatible loopback, ::/96)
+            {0, 0, 0, 0, 0, 0, 0x7F00, 0x0001},
+            # ::169.254.169.254 (v4-compatible link-local metadata IP)
+            {0, 0, 0, 0, 0, 0, 0xA9FE, 0xA9FE},
+            # ::ffff:0:127.0.0.1 (SIIT IPv4-translated loopback, ::ffff:0:0:0/96)
+            {0, 0, 0, 0, 0xFFFF, 0, 0x7F00, 0x0001},
+            # fec0::1 (deprecated site-local, fec0::/10)
+            {0xFEC0, 0, 0, 0, 0, 0, 0, 1},
+            # feff::1 (top of the site-local range)
+            {0xFEFF, 0, 0, 0, 0, 0, 0, 1},
             # 64:ff9b::10.0.0.1 (NAT64 private)
             {0x64, 0xFF9B, 0, 0, 0, 0, 0x0A00, 0x0001},
             # 2002:0a00:0001:: (6to4 embedding 10.0.0.1)
