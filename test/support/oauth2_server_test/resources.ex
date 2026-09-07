@@ -26,7 +26,8 @@ defmodule Oauth2ServerTest.OAuthClient do
   @moduledoc false
   use Ash.Resource,
     domain: Oauth2ServerTest.Domain,
-    data_layer: Ash.DataLayer.Ets
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshAuthentication.Oauth2Server.ClientResource]
 
   attributes do
     uuid_v7_primary_key :id
@@ -71,10 +72,7 @@ defmodule Oauth2ServerTest.OAuthClient do
       ]
     end
 
-    update :touch do
-      accept []
-      change atomic_update(:last_used_at, expr(now()))
-    end
+    # `:touch` and `:expunge_expired` are supplied by the ClientResource extension.
   end
 
   identities do

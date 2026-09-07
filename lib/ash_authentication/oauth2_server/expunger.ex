@@ -37,6 +37,7 @@ defmodule AshAuthentication.Oauth2Server.Expunger do
   use GenServer
 
   alias AshAuthentication.Oauth2Server.AuthorizationCodeResource
+  alias AshAuthentication.Oauth2Server.ClientResource
   alias AshAuthentication.Oauth2Server.RefreshTokenResource
 
   require Logger
@@ -91,8 +92,8 @@ defmodule AshAuthentication.Oauth2Server.Expunger do
   defp resolve_tenants(fun) when is_function(fun, 0), do: fun.()
   defp resolve_tenants({mod, fun, args}), do: apply(mod, fun, args)
 
-  # A resource may carry only one of the two extensions; produce the
-  # matching tuple so we know which `expunge_expired/1` helper to call.
+  # A resource carries at most one of these extensions; produce the matching
+  # tuple so we know which `expunge_expired/2` helper to call.
   defp extension_for(resource) do
     extensions = Spark.extensions(resource)
 
@@ -102,6 +103,9 @@ defmodule AshAuthentication.Oauth2Server.Expunger do
 
       RefreshTokenResource in extensions ->
         [{resource, RefreshTokenResource}]
+
+      ClientResource in extensions ->
+        [{resource, ClientResource}]
 
       true ->
         []

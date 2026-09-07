@@ -9,7 +9,14 @@ defmodule AshAuthentication.Oauth2Server.ExpungerTest do
   """
   use ExUnit.Case, async: false
 
-  alias AshAuthentication.Oauth2Server.{AuthorizationCodeResource, RefreshTokenResource}
+  alias AshAuthentication.Oauth2Server.{
+    AuthorizationCodeResource,
+    ClientResource,
+    RefreshTokenResource
+  }
+
+  # Matches ClientResource's default cimd_client_ttl (30 days).
+  @client_ttl 2_592_000
 
   alias Oauth2ServerTest.{
     OAuthAuthorizationCode,
@@ -121,6 +128,40 @@ defmodule AshAuthentication.Oauth2Server.ExpungerTest do
     end
   end
 
+  describe "ClientResource.expunge_expired/1" do
+    test "removes only CIMD rows unused for longer than the TTL" do
+      now = DateTime.utc_now()
+      stale = DateTime.add(now, -@client_ttl - 60, :second)
+      fresh = DateTime.add(now, -60, :second)
+
+      stale_cimd =
+        create_client!(cimd_url: "https://stale.example.com/client", last_used_at: stale)
+
+      fresh_cimd =
+        create_client!(cimd_url: "https://fresh.example.com/client", last_used_at: fresh)
+
+      assert :ok = ClientResource.expunge_expired(OAuthClient)
+
+      refute exists?(OAuthClient, stale_cimd.id)
+      assert exists?(OAuthClient, fresh_cimd.id)
+    end
+
+    test "never removes registered (non-CIMD) clients, however old" do
+      stale = DateTime.add(DateTime.utc_now(), -@client_ttl * 10, :second)
+
+      # cimd_url nil => registered client; must survive regardless of last_used_at.
+      registered = create_client!(cimd_url: nil, last_used_at: stale)
+      # A CIMD row that has never recorded a last_used_at is also left alone
+      # (the filter requires a non-nil last_used_at to compare against).
+      never_used = create_client!(cimd_url: "https://nulltime.example.com/client")
+
+      assert :ok = ClientResource.expunge_expired(OAuthClient)
+
+      assert exists?(OAuthClient, registered.id)
+      assert exists?(OAuthClient, never_used.id)
+    end
+  end
+
   describe "tenant scoping" do
     test "passes :tenant through to the underlying bulk_destroy" do
       past = DateTime.add(DateTime.utc_now(), -3600, :second)
@@ -197,6 +238,17 @@ defmodule AshAuthentication.Oauth2Server.ExpungerTest do
     }
 
     Ash.Seed.seed!(OAuthAuthorizationCode, Map.merge(defaults, Map.new(overrides)))
+  end
+
+  defp create_client!(overrides) do
+    defaults = %{
+      id: Ash.UUIDv7.generate(),
+      client_name: "Test Client",
+      redirect_uris: ["https://x.example.com/cb"],
+      scope: "mcp"
+    }
+
+    Ash.Seed.seed!(OAuthClient, Map.merge(defaults, Map.new(overrides)))
   end
 
   defp create_refresh!(overrides) do

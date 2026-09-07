@@ -35,6 +35,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
   Your client resource needs (the installer scaffolds these for new apps):
 
       attribute :cimd_url, :string, public?: true
+      attribute :last_used_at, :utc_datetime_usec, public?: true
 
       identity :by_cimd_url, [:cimd_url]
 
@@ -44,6 +45,12 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
         accept [:cimd_url, :client_name, :redirect_uris, :grant_types,
                 :response_types, :token_endpoint_auth_method, :scope]
       end
+
+  It also needs the `AshAuthentication.Oauth2Server.ClientResource`
+  extension, which supplies the `:touch` and `:expunge_expired` actions
+  used to garbage-collect stale CIMD clients (see that module). Without
+  it the client table grows one row per distinct URL `client_id` ever
+  resolved, with nothing to prune it.
 
   ## Fetching and SSRF
 
@@ -62,6 +69,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
 
   alias AshAuthentication.Oauth2Server.CIMD.Cache
   alias AshAuthentication.Oauth2Server.ClientMetadata
+  alias AshAuthentication.Oauth2Server.ClientResource
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -119,9 +127,23 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
     |> Ash.Query.filter(cimd_url == ^url)
     |> Ash.read_one(ash_opts(opts))
     |> case do
-      {:ok, client} when not is_nil(client) -> {:ok, client}
-      _ -> :error
+      {:ok, client} when not is_nil(client) ->
+        maybe_touch_last_used(client, opts)
+        {:ok, client}
+
+      _ ->
+        :error
     end
+  end
+
+  defp maybe_touch_last_used(client, opts) do
+    resource = client.__struct__
+
+    if ClientResource in Spark.extensions(resource) do
+      ClientResource.touch_last_used(client, tenant: opts[:tenant])
+    end
+
+    :ok
   end
 
   # ── document retrieval ─────────────────────────────────────────────────────
@@ -215,6 +237,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
     |> Ash.create(ash_opts(opts))
     |> case do
       {:ok, client} ->
+        maybe_touch_last_used(client, opts)
         {:ok, client}
 
       {:error, error} ->

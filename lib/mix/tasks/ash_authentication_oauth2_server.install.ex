@@ -247,15 +247,15 @@ if Code.ensure_loaded?(Igniter) do
         accept [:cimd_url, :client_name, :redirect_uris, :grant_types, :response_types, :token_endpoint_auth_method, :scope]
       end
       """)
-      |> Ash.Resource.Igniter.add_new_action(mod, :touch, """
-      update :touch do
-        accept []
-        change atomic_update(:last_used_at, expr(now()))
-      end
-      """)
       |> Ash.Resource.Igniter.add_new_identity(mod, :by_cimd_url, """
       identity :by_cimd_url, [:cimd_url]
       """)
+      # Garbage-collects stale CIMD clients: supplies the `:touch` and
+      # `:expunge_expired` actions and drives them from the Expunger.
+      |> Igniter.compose_task("ash.extend", [
+        inspect(mod),
+        "AshAuthentication.Oauth2Server.ClientResource"
+      ])
       |> add_authn_bypass(mod)
     end
 

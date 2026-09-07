@@ -107,6 +107,11 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
       assert client.token_endpoint_auth_method == "none"
       # The client's allowed scope is the server catalogue, like DCR.
       assert client.scope == "mcp"
+
+      # A resolve counts as a use, so the row is stamped and thus eligible
+      # for TTL-based expunging rather than living forever.
+      reloaded = Ash.get!(OAuthClient, client.id, context: %{private: %{ash_authentication?: true}})
+      refute is_nil(reloaded.last_used_at)
     end
 
     test "re-resolving updates the stored client in place (upsert)" do
@@ -180,6 +185,28 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
 
       assert {:error, "could not fetch client metadata document"} =
                CIMD.resolve_client(CimdServer, @client_id)
+    end
+  end
+
+  describe "find_client/3 keeps active clients from being expunged" do
+    test "bumps last_used_at on the found client" do
+      StubFetcher.stub(@client_id, document())
+      {:ok, client} = CIMD.resolve_client(CimdServer, @client_id)
+
+      # Backdate last_used_at so any bump is unambiguous.
+      stale = DateTime.add(DateTime.utc_now(), -3600, :second)
+      Ash.Seed.update!(client, %{last_used_at: stale})
+
+      assert {:ok, found} = CIMD.find_client(CimdServer, @client_id)
+      assert found.id == client.id
+
+      reloaded = Ash.get!(OAuthClient, client.id, context: %{private: %{ash_authentication?: true}})
+      assert DateTime.compare(reloaded.last_used_at, stale) == :gt
+    end
+
+    test "returns :error for an unknown url and does not create a row" do
+      assert :error = CIMD.find_client(CimdServer, "https://never.seen/client")
+      assert Ash.count!(OAuthClient) == 0
     end
   end
 

@@ -163,6 +163,11 @@ defmodule AshAuthentication.Oauth2Server do
     quote bind_quoted: [opts: opts] do
       Oauth2Server.__validate_opts__!(__MODULE__, opts)
 
+      # Fail closed at compile time if CIMD is enabled without the client-resource
+      # garbage-collection extension — see __verify_cimd_support__!/1. Deferred to
+      # @after_verify so the client resource is fully compiled before we introspect it.
+      @after_verify {Oauth2Server, :__verify_cimd_support__!}
+
       @oauth2_server_opts Keyword.merge(Oauth2Server.__default_opts__(), opts)
 
       def otp_app, do: Keyword.fetch!(@oauth2_server_opts, :otp_app)
@@ -285,6 +290,41 @@ defmodule AshAuthentication.Oauth2Server do
         end
       end
     )
+
+    :ok
+  end
+
+  @doc false
+  # Runs via @after_verify on every `use AshAuthentication.Oauth2Server` module.
+  # When CIMD is enabled the client resource MUST carry the ClientResource
+  # extension; otherwise a row accumulates for every distinct URL client_id ever
+  # resolved at /authorize with nothing to prune it (unbounded-growth DoS). We
+  # fail the build rather than silently leak.
+  def __verify_cimd_support__!(module) do
+    if module.cimd_enabled?() do
+      client_resource = module.client_resource()
+      Code.ensure_compiled!(client_resource)
+
+      unless Oauth2Server.ClientResource in Spark.extensions(client_resource) do
+        raise CompileError,
+          description: """
+          #{inspect(module)} has `cimd_enabled?: true`, but its client resource \
+          (#{inspect(client_resource)}) is missing the \
+          `AshAuthentication.Oauth2Server.ClientResource` extension.
+
+          Without it, a client row is stored for every distinct URL `client_id` \
+          ever resolved at `/authorize`, and nothing prunes them — an \
+          unbounded-growth denial-of-service vector. Add the extension to your \
+          client resource (no migration is required):
+
+              use Ash.Resource,
+                extensions: [AshAuthentication.Oauth2Server.ClientResource],
+                ...
+
+          See `AshAuthentication.Oauth2Server.ClientResource`.
+          """
+      end
+    end
 
     :ok
   end
