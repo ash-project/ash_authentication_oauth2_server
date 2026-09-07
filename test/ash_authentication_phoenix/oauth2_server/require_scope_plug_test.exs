@@ -14,8 +14,23 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlugTest do
   import Plug.Conn
 
   alias AshAuthentication.Oauth2Server.Jwt
-  alias AshAuthentication.Phoenix.Oauth2Server.{BearerPlug, RequireScopePlug}
+  alias AshAuthentication.Phoenix.Oauth2Server.{BearerPlug, Errors, RequireScopePlug}
   alias Oauth2ServerTest.{Server, User}
+
+  # An attacker-controlled tenant value that tries to close the quoted
+  # resource_metadata value and smuggle a second auth-param.
+  @injection ~s|victim", scope="admin", filler="x|
+
+  # A server whose resource_url bakes in the (request-derived) tenant, like a
+  # typical multi-tenant app. The challenge paths only call resource_url/1, so
+  # this stand-in is enough to drive the tenant into the emitted header.
+  defmodule InjectionServer do
+    @moduledoc false
+    def resource_url(%{tenant: tenant}) when is_binary(tenant),
+      do: "https://#{tenant}.app.example.com/mcp"
+
+    def resource_url(_), do: "https://app.example.com/mcp"
+  end
 
   setup do
     Ash.bulk_destroy!(User, :destroy, %{}, return_errors?: true)
@@ -102,6 +117,67 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlugTest do
 
       refute conn.halted
       assert conn.assigns.oauth_claims["scope"] == "mcp"
+    end
+  end
+
+  describe "challenge header injection via the tenant" do
+    test "BearerPlug escapes a tenant that tries to smuggle auth-params" do
+      conn =
+        conn(:get, "/")
+        |> Ash.PlugHelpers.set_tenant(@injection)
+        |> BearerPlug.call(BearerPlug.init(oauth2_server: InjectionServer))
+
+      assert conn.status == 401
+      challenge = www_authenticate(conn)
+
+      # The `"` from the tenant is neutralised, so `scope="admin"` never
+      # appears as a real auth-param — only inside the escaped metadata value.
+      refute challenge =~ ~s|scope="admin"|
+      assert challenge =~ ~S|scope=\"admin\"|
+    end
+
+    test "RequireScopePlug (401, no claims) escapes the tenant" do
+      conn =
+        conn(:get, "/")
+        |> Ash.PlugHelpers.set_tenant(@injection)
+        |> RequireScopePlug.call(
+          RequireScopePlug.init(oauth2_server: InjectionServer, scope: "mcp.read")
+        )
+
+      assert conn.status == 401
+      challenge = www_authenticate(conn)
+      refute challenge =~ ~s|scope="admin"|
+      assert challenge =~ ~S|scope=\"admin\"|
+    end
+
+    test "RequireScopePlug (403, insufficient_scope) escapes the tenant" do
+      conn =
+        claims_conn("mcp.read")
+        |> Ash.PlugHelpers.set_tenant(@injection)
+        |> RequireScopePlug.call(
+          RequireScopePlug.init(oauth2_server: InjectionServer, scope: ["mcp.read", "mcp.write"])
+        )
+
+      assert conn.status == 403
+      challenge = www_authenticate(conn)
+      # The legitimate required-scope param is present…
+      assert challenge =~ ~s|scope="mcp.read mcp.write"|
+      # …but the injected admin scope is not a real param.
+      refute challenge =~ ~s|scope="admin"|
+    end
+  end
+
+  describe "Errors.bearer_challenge/1" do
+    test "drops nils and escapes quoted-string values" do
+      challenge =
+        Errors.bearer_challenge([
+          {"resource_metadata", ~s|https://victim", scope="admin"|},
+          {"scope", nil},
+          {"error", "invalid_token"}
+        ])
+
+      assert challenge == ~S|Bearer resource_metadata="https://victim\", scope=\"admin\"", error="invalid_token"|
+      refute challenge =~ ~s|scope="admin"|
     end
   end
 end

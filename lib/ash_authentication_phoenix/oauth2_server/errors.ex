@@ -48,19 +48,31 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   @spec send_bearer_error(Plug.Conn.t(), pos_integer(), String.t(), String.t() | nil) ::
           Plug.Conn.t()
   def send_bearer_error(conn, status, code, description \\ nil) do
-    challenge =
-      [{"error", code}, {"error_description", description}]
-      |> Enum.reject(fn {_, v} -> is_nil(v) end)
-      |> Enum.map_join(", ", fn {k, v} -> ~s|#{k}="#{escape_quoted(v)}"| end)
-
+    challenge = bearer_challenge([{"error", code}, {"error_description", description}])
     body = %{"error" => code} |> maybe_put("error_description", description)
 
     conn
     |> put_resp_header("content-type", "application/json")
     |> put_resp_header("cache-control", "no-store")
-    |> put_resp_header("www-authenticate", "Bearer " <> challenge)
+    |> put_resp_header("www-authenticate", challenge)
     |> send_resp(status, Jason.encode!(body))
     |> halt()
+  end
+
+  @doc false
+  # Build a `WWW-Authenticate: Bearer …` header value from ordered
+  # `{key, value}` auth-params. `nil` values are dropped and every value is
+  # escaped as an RFC 7235 quoted-string, so a value derived from request data
+  # (e.g. a tenant-bearing `resource_metadata` URL) can't break out of its
+  # quotes and inject additional auth-params.
+  @spec bearer_challenge([{String.t(), String.t() | nil}]) :: String.t()
+  def bearer_challenge(params) do
+    challenge =
+      params
+      |> Enum.reject(fn {_, v} -> is_nil(v) end)
+      |> Enum.map_join(", ", fn {k, v} -> ~s|#{k}="#{escape_quoted(v)}"| end)
+
+    "Bearer " <> challenge
   end
 
   # WWW-Authenticate quoted-string values: backslash-escape `"` and `\`.
@@ -93,14 +105,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
     description = Keyword.get(opts, :description)
 
     challenge =
-      [
+      bearer_challenge([
         {"error", "insufficient_scope"},
         {"scope", scope},
         {"resource_metadata", resource_metadata_url(server, Keyword.get(opts, :tenant))},
         {"error_description", description}
-      ]
-      |> Enum.reject(fn {_, v} -> is_nil(v) end)
-      |> Enum.map_join(", ", fn {k, v} -> ~s|#{k}="#{escape_quoted(v)}"| end)
+      ])
 
     body =
       %{"error" => "insufficient_scope", "scope" => scope}
@@ -109,7 +119,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
     conn
     |> put_resp_header("content-type", "application/json")
     |> put_resp_header("cache-control", "no-store")
-    |> put_resp_header("www-authenticate", "Bearer " <> challenge)
+    |> put_resp_header("www-authenticate", challenge)
     |> send_resp(403, Jason.encode!(body))
     |> halt()
   end

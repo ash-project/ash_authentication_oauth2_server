@@ -195,24 +195,29 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   defp challenge(conn, server, reason, scope) do
     metadata_url = Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn))
+    {error, error_description} = error_params(reason)
 
-    scope_param = if scope, do: ~s|, scope="#{scope}"|, else: ""
-
-    error_param =
-      case reason do
-        nil -> ""
-        :invalid_audience -> ~s|, error="invalid_token", error_description="audience mismatch"|
-        :invalid_issuer -> ~s|, error="invalid_token", error_description="issuer mismatch"|
-        :expired -> ~s|, error="invalid_token", error_description="token expired"|
-        _ -> ~s|, error="invalid_token"|
-      end
+    challenge =
+      Errors.bearer_challenge([
+        {"resource_metadata", metadata_url},
+        {"scope", scope},
+        {"error", error},
+        {"error_description", error_description}
+      ])
 
     conn
-    |> put_resp_header(
-      "www-authenticate",
-      ~s|Bearer resource_metadata="#{metadata_url}"#{scope_param}#{error_param}|
-    )
+    |> put_resp_header("www-authenticate", challenge)
     |> send_resp(401, "")
     |> halt()
+  end
+
+  defp error_params(reason) do
+    case reason do
+      nil -> {nil, nil}
+      :invalid_audience -> {"invalid_token", "audience mismatch"}
+      :invalid_issuer -> {"invalid_token", "issuer mismatch"}
+      :expired -> {"invalid_token", "token expired"}
+      _ -> {"invalid_token", nil}
+    end
   end
 end

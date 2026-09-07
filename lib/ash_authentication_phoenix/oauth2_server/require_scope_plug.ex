@@ -89,7 +89,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug do
     metadata_url = Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn))
 
     conn
-    |> put_resp_header("www-authenticate", ~s|Bearer resource_metadata="#{metadata_url}"|)
+    |> put_resp_header(
+      "www-authenticate",
+      Errors.bearer_challenge([{"resource_metadata", metadata_url}])
+    )
     |> send_resp(401, "")
     |> halt()
   end
