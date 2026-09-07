@@ -121,8 +121,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
         forward oauth_path, AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter,
           oauth2_server: server
 
+        # The same plug is forwarded here, but `well_known?: true` restricts it
+        # to the metadata discovery documents. Phoenix's forward strips the
+        # prefix before dispatch, so without that flag the state-changing
+        # /register, /token, and /revoke routes would answer under /.well-known
+        # too, bypassing edge controls scoped to the oauth path.
         forward well_known_path, AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter,
-          oauth2_server: server
+          oauth2_server: server,
+          well_known?: true
       end
     end
   end

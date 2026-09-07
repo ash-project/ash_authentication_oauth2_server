@@ -32,6 +32,18 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
   @consent_opts ConsentRouter.init(oauth2_server: Server)
   @protocol_opts ProtocolRouter.init(oauth2_server: Server)
 
+  # A real Phoenix router wired through the public macro, so the `/oauth` and
+  # `/.well-known` mounts exercise Phoenix's prefix-stripping `forward` exactly
+  # as an application would.
+  defmodule PhoenixRouterFixture do
+    use Phoenix.Router
+    use AshAuthentication.Phoenix.Oauth2Server.Router
+
+    oauth2_server_protocol_routes(oauth2_server: Oauth2ServerTest.Server)
+  end
+
+  defp call_router(conn), do: PhoenixRouterFixture.call(conn, PhoenixRouterFixture.init([]))
+
   setup do
     for resource <- [OAuthClient, OAuthAuthorizationCode, OAuthRefreshToken, OAuthConsent, User] do
       Ash.bulk_destroy!(resource, :destroy, %{}, return_errors?: true)
@@ -100,6 +112,32 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       body = Jason.decode!(conn.resp_body)
       assert body["resource"] == Server.resource_url()
       assert body["authorization_servers"] == [Server.issuer_url()]
+    end
+  end
+
+  describe "Router: /.well-known serves only metadata, not protocol endpoints" do
+    test "the metadata documents answer under /.well-known" do
+      for path <- [
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration",
+            "/.well-known/oauth-protected-resource"
+          ] do
+        conn = call_router(conn(:get, path))
+        assert conn.status == 200, "expected 200 for #{path}, got #{conn.status}"
+      end
+    end
+
+    test "state-changing endpoints are NOT aliased under /.well-known" do
+      for path <- ["/.well-known/register", "/.well-known/token", "/.well-known/revoke"] do
+        conn = call_router(conn(:post, path, %{}))
+        assert conn.status == 404, "expected 404 for #{path}, got #{conn.status}"
+      end
+    end
+
+    test "the same endpoints remain reachable under /oauth" do
+      # Not 404 — reachable (exact status depends on DCR/token validation).
+      refute call_router(conn(:post, "/oauth/register", %{})).status == 404
+      assert call_router(conn(:get, "/oauth/oauth-authorization-server")).status == 200
     end
   end
 

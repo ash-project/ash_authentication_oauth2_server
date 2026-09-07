@@ -36,7 +36,31 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     json_decoder: Jason
 
   plug :match
+  plug :restrict_well_known_mount
   plug :dispatch
+
+  # The metadata discovery documents — the only routes allowed to answer under
+  # the `/.well-known` mount (see the `well_known?` forward in the Router).
+  @well_known_paths [
+    ["oauth-authorization-server"],
+    ["openid-configuration"],
+    ["oauth-protected-resource"]
+  ]
+
+  # This router is forwarded at both `/oauth` (full route table) and
+  # `/.well-known` (`well_known?: true`). Because Phoenix strips the matched
+  # prefix before dispatch, both mounts otherwise see the same route table — so
+  # under `/.well-known` we serve only the metadata GETs and 404 everything else
+  # (notably the state-changing /register, /token, /revoke).
+  defp restrict_well_known_mount(conn, _opts) do
+    well_known? = Keyword.get(conn.assigns.oauth2_server_router_opts, :well_known?, false)
+
+    if well_known? and not (conn.method == "GET" and conn.path_info in @well_known_paths) do
+      conn |> send_resp(404, "") |> halt()
+    else
+      conn
+    end
+  end
 
   # ── metadata ───────────────────────────────────────────────────────────────
 
