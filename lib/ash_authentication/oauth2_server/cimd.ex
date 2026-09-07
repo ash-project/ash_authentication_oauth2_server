@@ -96,8 +96,13 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
   def resolve_client(server, url, opts \\ []) do
     ensure_client_resource_support!(server)
 
-    with {:ok, document} <- get_document(server, url),
+    with {:ok, document, source} <- get_document(server, url),
          :ok <- validate_document(document, url) do
+      # Cache only freshly fetched documents that passed validation. The CIMD
+      # draft requires that the authorization server MUST NOT cache invalid or
+      # malformed documents, so caching before validation (as it did before) let
+      # a rejected document occupy a cache slot until its TTL/sweep.
+      maybe_cache(url, document, source)
       upsert_client(server, url, document, opts)
     end
   end
@@ -124,7 +129,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
   defp get_document(server, url) do
     case Cache.get(url) do
       {:ok, document} ->
-        {:ok, document}
+        {:ok, document, :cached}
 
       :miss ->
         fetch_document(server, url)
@@ -134,8 +139,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
   defp fetch_document(server, url) do
     case server.cimd_fetcher().fetch(url, server.cimd_fetch_options()) do
       {:ok, %{document: document, cache_ttl: ttl}} ->
-        Cache.put(url, document, clamp_ttl(ttl))
-        {:ok, document}
+        {:ok, document, {:fetched, clamp_ttl(ttl)}}
 
       {:error, reason} ->
         Logger.warning(
@@ -146,6 +150,10 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
         {:error, "could not fetch client metadata document"}
     end
   end
+
+  # Only freshly fetched documents need caching; a cache hit is already stored.
+  defp maybe_cache(url, document, {:fetched, ttl}), do: Cache.put(url, document, ttl)
+  defp maybe_cache(_url, _document, :cached), do: :ok
 
   defp clamp_ttl(nil), do: @default_cache_ttl
   defp clamp_ttl(ttl) when is_integer(ttl) and ttl >= 0, do: min(ttl, @max_cache_ttl)

@@ -308,6 +308,36 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
     end
   end
 
+  describe "resolve_client/3 caches only validated documents" do
+    setup do
+      start_supervised!({Cache, []})
+      :ok
+    end
+
+    test "a validated document is cached, an invalid one is not" do
+      valid = "https://valid.example.net/c.json"
+      invalid = "https://invalid.example.net/c.json"
+
+      StubFetcher.stub(valid, %{
+        document: document(%{"client_id" => valid}),
+        cache_ttl: 300
+      })
+
+      # Same fetch (positive TTL) but missing client_name — rejected by validation.
+      StubFetcher.stub(invalid, %{
+        document: Map.delete(document(%{"client_id" => invalid}), "client_name"),
+        cache_ttl: 300
+      })
+
+      assert {:ok, _} = CIMD.resolve_client(CimdServer, valid)
+      assert {:ok, _} = Cache.get(valid)
+
+      assert {:error, _} = CIMD.resolve_client(CimdServer, invalid)
+      # Pre-fix this was cached (put happened before validation).
+      assert :miss = Cache.get(invalid)
+    end
+  end
+
   describe "ReqFetcher.validate_url/2" do
     test "accepts a well-formed CIMD URL" do
       assert {:ok, %URI{}} = ReqFetcher.validate_url("https://app.example.com/client.json")

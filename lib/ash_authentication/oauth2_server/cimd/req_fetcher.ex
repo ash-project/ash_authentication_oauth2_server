@@ -26,8 +26,9 @@ defmodule AshAuthentication.Oauth2Server.CIMD.ReqFetcher do
     * **No redirects** — a redirect response is an error. A compliant
       CIMD document is served directly at its `client_id` URL.
     * **Bounded response** — the body is capped at `:max_body_bytes`
-      (default 64 KiB) and the request at `:receive_timeout` /
-      `:connect_timeout` (default 5s each).
+      (default 5 KiB, the size the CIMD draft recommends servers limit
+      reads to) and the request at `:receive_timeout` / `:connect_timeout`
+      (default 5s each).
 
   Requires the optional `:req` dependency:
 
@@ -35,7 +36,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD.ReqFetcher do
 
   ## Options (via `:cimd_fetch_options` on your server module)
 
-    * `:max_body_bytes` — response size cap (default `65_536`)
+    * `:max_body_bytes` — response size cap (default `5_120`)
     * `:connect_timeout` — TCP/TLS connect timeout in ms (default `5_000`)
     * `:receive_timeout` — response receive timeout in ms (default `5_000`)
     * `:allowed_ports` — permitted URL ports (default `[443]`)
@@ -46,7 +47,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD.ReqFetcher do
 
   @behaviour AshAuthentication.Oauth2Server.CIMD.Fetcher
 
-  @default_max_body_bytes 65_536
+  @default_max_body_bytes 5_120
   @default_timeout 5_000
   @default_allowed_ports [443]
 

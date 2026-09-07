@@ -372,6 +372,7 @@ defmodule Oauth2ServerTest.StubFetcher do
     |> case do
       nil -> {:error, :not_stubbed}
       {:error, _} = error -> error
+      %{document: _document, cache_ttl: _ttl} = response -> {:ok, response}
       document when is_map(document) -> {:ok, %{document: document, cache_ttl: 0}}
     end
   end
