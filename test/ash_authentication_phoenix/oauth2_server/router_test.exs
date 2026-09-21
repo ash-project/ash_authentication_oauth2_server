@@ -29,7 +29,70 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
     User
   }
 
+  defmodule CustomConsentView do
+    @moduledoc false
+
+    def render(:consent, assigns) do
+      """
+      <form method="post" action="#{assigns.action_path}">
+        <input name="consent_request" value="#{assigns.consent_request}" />
+        <span data-extra>#{Map.get(assigns, :extra, "missing")}</span>
+        <span data-error>#{Map.get(assigns, :error, "")}</span>
+      </form>
+      """
+    end
+  end
+
+  defmodule CustomConsentHandler do
+    @moduledoc false
+
+    @behaviour AshAuthentication.Phoenix.Oauth2Server.ConsentHandler
+
+    alias AshAuthentication.Oauth2Server.Authorize
+
+    @impl true
+    def consented?(server, user, validated, opts) do
+      case Process.get(:custom_consent_prior_decision) do
+        nil -> Authorize.consented?(server, user, validated.client, validated.scope, opts)
+        decision -> decision
+      end
+    end
+
+    @impl true
+    def prepare(_server, _user, _validated, params, _opts) do
+      send(self(), {:custom_consent_prepared, params})
+      {:ok, %{extra: "prepared"}}
+    end
+
+    @impl true
+    def grant(server, user, validated, params, opts) do
+      send(self(), {:custom_consent_granted, params})
+
+      case Map.get(params, "workspace_id") do
+        "allowed" ->
+          {:ok,
+           Authorize.grant_consent!(
+             server,
+             user,
+             validated.client,
+             validated.scope,
+             opts
+           )}
+
+        _other ->
+          {:error, %{extra: "prepared", error: "workspace required"}}
+      end
+    end
+  end
+
   @consent_opts ConsentRouter.init(oauth2_server: Server)
+
+  @custom_consent_opts ConsentRouter.init(
+                         oauth2_server: Server,
+                         consent_view: CustomConsentView,
+                         consent_handler: CustomConsentHandler
+                       )
+
   @protocol_opts ProtocolRouter.init(oauth2_server: Server)
 
   # A real Phoenix router wired through the public macro, so the `/oauth` and
@@ -61,6 +124,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
     conn
     |> Plug.Test.init_test_session(%{})
     |> ConsentRouter.call(@consent_opts)
+  end
+
+  defp call_custom_consent(conn) do
+    conn
+    |> Plug.Test.init_test_session(%{})
+    |> ConsentRouter.call(@custom_consent_opts)
   end
 
   defp call_protocol(conn), do: ProtocolRouter.call(conn, @protocol_opts)
@@ -300,6 +369,103 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
     end
   end
 
+  describe "ConsentRouter: custom consent handler" do
+    test "adds application assigns without exposing authorization flow internals", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+
+      params = authorize_query(client_id, redirect_uri, challenge)
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(params))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_custom_consent()
+
+      assert conn.status == 200
+      assert conn.resp_body =~ ~s(<span data-extra>prepared</span>)
+      assert_received {:custom_consent_prepared, ^params}
+    end
+
+    test "can require renewed application consent despite a sufficient OAuth scope grant", %{
+      user: user
+    } do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+
+      OAuthConsent
+      |> Ash.Changeset.for_create(:grant, %{user_id: user.id, client_id: client_id, scope: "mcp"})
+      |> Ash.create!()
+
+      Process.put(:custom_consent_prior_decision, false)
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(authorize_query(client_id, redirect_uri, challenge)))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_custom_consent()
+
+      assert conn.status == 200
+      assert conn.resp_body =~ ~s(<span data-extra>prepared</span>)
+    after
+      Process.delete(:custom_consent_prior_decision)
+    end
+
+    test "re-renders a rejected application grant without issuing a code", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+
+      consent_request =
+        obtain_consent_request_with(
+          user,
+          client_id,
+          redirect_uri,
+          challenge,
+          &call_custom_consent/1
+        )
+
+      conn =
+        conn(:post, "/", %{"consent_request" => consent_request, "action" => "approve"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_custom_consent()
+
+      assert conn.status == 422
+      assert conn.resp_body =~ ~s(<span data-error>workspace required</span>)
+      assert_received {:custom_consent_granted, %{"action" => "approve"}}
+      assert {:ok, []} = Ash.read(OAuthConsent)
+      assert {:ok, []} = Ash.read(OAuthAuthorizationCode)
+    end
+
+    test "persists through the handler and retains library-owned code issuance", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+
+      consent_request =
+        obtain_consent_request_with(
+          user,
+          client_id,
+          redirect_uri,
+          challenge,
+          &call_custom_consent/1
+        )
+
+      conn =
+        conn(:post, "/", %{
+          "consent_request" => consent_request,
+          "action" => "approve",
+          "workspace_id" => "allowed"
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_custom_consent()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri <> "?")
+      assert {:ok, [_]} = Ash.read(OAuthConsent)
+      assert {:ok, [_]} = Ash.read(OAuthAuthorizationCode)
+    end
+  end
+
   describe "ConsentRouter: POST /authorize" do
     test "approves and 302s with code, recording consent", %{user: user} do
       {client_id, redirect_uri} = create_client_for_authorize()
@@ -452,10 +618,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
   # consent_request token. POSTs to /authorize must use this token rather
   # than re-submitting the raw protocol params.
   defp obtain_consent_request(user, client_id, redirect_uri, challenge) do
+    obtain_consent_request_with(user, client_id, redirect_uri, challenge, &call_consent/1)
+  end
+
+  defp obtain_consent_request_with(user, client_id, redirect_uri, challenge, router) do
     conn =
       conn(:get, "/?" <> URI.encode_query(authorize_query(client_id, redirect_uri, challenge)))
       |> Ash.PlugHelpers.set_actor(user)
-      |> call_consent()
+      |> router.()
 
     [_, token] = Regex.run(~r/name="consent_request" value="([^"]+)"/, conn.resp_body)
     token
