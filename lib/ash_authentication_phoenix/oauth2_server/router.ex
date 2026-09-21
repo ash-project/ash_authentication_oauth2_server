@@ -69,6 +69,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
     * `:path` — base path. Defaults to `/oauth/authorize`.
     * `:consent_view` — module exposing `render(:consent, assigns)`.
       Defaults to `AshAuthentication.Phoenix.Oauth2Server.ConsentView`.
+    * `:consent_handler` — module implementing
+      `AshAuthentication.Phoenix.Oauth2Server.ConsentHandler`. Defaults to the
+      scope-only `AshAuthentication.Phoenix.Oauth2Server.ConsentHandler.Default`.
   """
   defmacro oauth2_server_consent_routes(opts \\ []) when is_list(opts) do
     quote location: :keep do
@@ -79,10 +82,18 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
       consent_view =
         Keyword.get(opts, :consent_view, AshAuthentication.Phoenix.Oauth2Server.ConsentView)
 
+      consent_handler =
+        Keyword.get(
+          opts,
+          :consent_handler,
+          AshAuthentication.Phoenix.Oauth2Server.ConsentHandler.Default
+        )
+
       scope "/", alias: false do
         forward path, AshAuthentication.Phoenix.Oauth2Server.ConsentRouter,
           oauth2_server: server,
-          consent_view: consent_view
+          consent_view: consent_view,
+          consent_handler: consent_handler
       end
     end
   end

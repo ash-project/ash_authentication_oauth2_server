@@ -19,12 +19,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     * `:oauth2_server` (required) — the user's `Oauth2Server` config module
     * `:consent_view` — module exposing `render(:consent, assigns)`
       (default: `AshAuthentication.Phoenix.Oauth2Server.ConsentView`)
+    * `:consent_handler` — module implementing
+      `AshAuthentication.Phoenix.Oauth2Server.ConsentHandler` (default:
+      `AshAuthentication.Phoenix.Oauth2Server.ConsentHandler.Default`)
   """
 
   use Plug.Router, copy_opts_to_assign: :oauth2_server_router_opts
 
   alias AshAuthentication.Oauth2Server
   alias AshAuthentication.Oauth2Server.{Authorize, CIMD}
+  alias AshAuthentication.Phoenix.Oauth2Server.ConsentHandler.Default, as: DefaultConsentHandler
   alias AshAuthentication.Phoenix.Oauth2Server.{ConsentView, Errors}
 
   @max_state_bytes 2048
@@ -45,7 +49,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
 
   post "/" do
     opts = conn.assigns.oauth2_server_router_opts
-    handle_post(conn, server!(opts))
+    handle_post(conn, server!(opts), opts)
   end
 
   match _ do
@@ -62,10 +66,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     with :ok <- check_state_size(params),
          {:ok, validated} <- Authorize.validate_request(server, params, tenant_opts),
          {:ok, user} <- require_user(conn) do
-      if Authorize.consented?(server, user, validated.client, validated.scope, tenant_opts) do
+      if consent_handler!(opts).consented?(server, user, validated, tenant_opts) do
         issue_code_redirect(conn, server, user, validated)
       else
-        render_consent(conn, validated, opts)
+        prepare_and_render_consent(conn, server, user, validated, params, opts)
       end
     else
       {:error, :no_user} -> sign_in_redirect(conn, server)
@@ -79,12 +83,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   # token that was minted server-side at GET time. The form's own scope /
   # code_challenge / redirect_uri values are intentionally ignored — that
   # binds the user-visible consent UI to what we actually act on.
-  defp handle_post(conn, server) do
+  defp handle_post(conn, server, opts) do
     raw_params = conn.params
 
     case verify_consent_request(server, Map.get(raw_params, "consent_request")) do
       {:ok, sealed} ->
-        handle_post_authorized(conn, server, raw_params, sealed_params(sealed))
+        handle_post_authorized(conn, server, raw_params, sealed_params(sealed), opts)
 
       {:error, _} ->
         Errors.send_oauth_error(
@@ -96,18 +100,22 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     end
   end
 
-  defp handle_post_authorized(conn, server, raw_params, params) do
+  defp handle_post_authorized(conn, server, raw_params, params, opts) do
     tenant_opts = tenant_opts(conn)
 
     with {:ok, validated} <- Authorize.validate_request(server, params, tenant_opts),
          {:ok, user} <- require_user(conn) do
       case Map.get(raw_params, "action") do
         "approve" ->
-          Authorize.grant_consent!(server, user, validated.client, validated.scope, tenant_opts)
+          case consent_handler!(opts).grant(server, user, validated, raw_params, tenant_opts) do
+            {:ok, _grant} ->
+              conn
+              |> rotate_session()
+              |> issue_code_redirect(server, user, validated)
 
-          conn
-          |> rotate_session()
-          |> issue_code_redirect(server, user, validated)
+            {:error, extra_assigns} when is_map(extra_assigns) ->
+              render_consent(conn, server, validated, opts, extra_assigns, 422)
+          end
 
         "deny" ->
           redirect_with_oauth_error(
@@ -133,6 +141,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
 
   defp server!(opts), do: Keyword.fetch!(opts, :oauth2_server)
   defp consent_view!(opts), do: Keyword.get(opts, :consent_view, ConsentView)
+  defp consent_handler!(opts), do: Keyword.get(opts, :consent_handler, DefaultConsentHandler)
 
   defp require_user(conn) do
     case Ash.PlugHelpers.get_actor(conn) do
@@ -263,11 +272,21 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   # pre-login session id can't carry into the consented context.
   defp rotate_session(conn), do: Plug.Conn.configure_session(conn, renew: true)
 
+  defp prepare_and_render_consent(conn, server, user, validated, params, opts) do
+    case consent_handler!(opts).prepare(server, user, validated, params, tenant_opts(conn)) do
+      {:ok, extra_assigns} when is_map(extra_assigns) ->
+        render_consent(conn, server, validated, opts, extra_assigns, 200)
+
+      {:error, extra_assigns} when is_map(extra_assigns) ->
+        render_consent(conn, server, validated, opts, extra_assigns, 422)
+    end
+  end
+
   # sobelow_skip ["XSS.SendResp"]
-  defp render_consent(conn, validated, opts) do
+  defp render_consent(conn, server, validated, opts, extra_assigns, status) do
     view = consent_view!(opts)
 
-    assigns = %{
+    core_assigns = %{
       client_name: validated.client.client_name,
       client_id: validated.client.id,
       redirect_uri: validated.redirect_uri,
@@ -277,16 +296,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
       resource: validated.resource,
       action_path: conn.request_path,
       csrf_token: get_csrf_token(),
-      consent_request: mint_consent_request(server!(opts), validated)
+      consent_request: mint_consent_request(server, validated)
     }
 
-    body = view.render(:consent, assigns) |> IO.iodata_to_binary()
+    body =
+      extra_assigns
+      |> Map.merge(core_assigns)
+      |> then(&view.render(:consent, &1))
+      |> IO.iodata_to_binary()
 
     conn
     |> put_resp_header("content-type", "text/html; charset=utf-8")
     |> put_resp_header("x-frame-options", "DENY")
     |> put_resp_header("content-security-policy", "frame-ancestors 'none'")
-    |> send_resp(200, body)
+    |> send_resp(status, body)
     |> halt()
   end
 
