@@ -22,8 +22,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
     body = %{"error" => code} |> maybe_put("error_description", description)
 
     conn
-    |> put_resp_header("content-type", "application/json")
+    # RFC 6749 §5.1/§5.2 examples use charset=UTF-8; media type itself is application/json.
+    |> put_resp_header("content-type", "application/json; charset=UTF-8")
+    # RFC 6749 §5.1 — MUST send Cache-Control: no-store and Pragma: no-cache.
     |> put_resp_header("cache-control", "no-store")
+    |> put_resp_header("pragma", "no-cache")
     |> send_resp(status, Jason.encode!(body))
     |> halt()
   end
@@ -52,8 +55,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
     body = %{"error" => code} |> maybe_put("error_description", description)
 
     conn
-    |> put_resp_header("content-type", "application/json")
+    # RFC 6749 §5.1/§5.2 examples use charset=UTF-8; media type itself is application/json.
+    |> put_resp_header("content-type", "application/json; charset=UTF-8")
+    # RFC 6749 §5.1 — MUST send Cache-Control: no-store and Pragma: no-cache.
     |> put_resp_header("cache-control", "no-store")
+    |> put_resp_header("pragma", "no-cache")
     |> put_resp_header("www-authenticate", challenge)
     |> send_resp(status, Jason.encode!(body))
     |> halt()
@@ -175,7 +181,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       :unauthorized_client -> {400, "unauthorized_client", "grant type not registered"}
       :invalid_scope -> {400, "invalid_scope", "requested scope exceeds the grant"}
       :invalid_request -> {400, "invalid_request", "missing required parameters"}
-      :refresh_create_failed -> {500, "server_error", "could not issue refresh token"}
+XX {500, "server_error", "could not issue refresh token"}
       _ -> {500, "server_error", "request could not be processed"}
     end
   end

@@ -14,7 +14,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
       document for each configured resource
     * `GET /openid-configuration`       — alias for OIDC-conformant tooling
     * `POST /register`                  — RFC 7591 Dynamic Client Registration
-    * `POST /token`                     — authorization_code + refresh_token grants
+    * `POST /token`                     — authorization_code, refresh_token,
+                                         and client_credentials grants
     * `POST /revoke`                    — RFC 7009 token revocation
 
   Mount this behind your API pipeline (no CSRF, no session needed). For the
@@ -28,7 +29,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
 
   use Plug.Router, copy_opts_to_assign: :oauth2_server_router_opts
 
-  alias AshAuthentication.Oauth2Server.{Metadata, Register, Token}
+  alias AshAuthentication.Oauth2Server.{ClientAuth, Metadata, Register, Token}
   alias AshAuthentication.Phoenix.Oauth2Server.{BearerPlug, Errors}
 
   plug Plug.Parsers,
@@ -154,23 +155,29 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   # ── token ──────────────────────────────────────────────────────────────────
 
   post "/token" do
+    conn = fetch_query_params(conn)
     server = server!(conn.assigns.oauth2_server_router_opts)
     params = conn.params || %{}
     opts = client_request_opts(conn)
 
     result =
-      case Map.get(params, "grant_type") do
-        "authorization_code" -> Token.exchange_authorization_code(server, params, opts)
-        "refresh_token" -> Token.exchange_refresh_token(server, params, opts)
-        type when type in [nil, ""] -> {:error, :invalid_request}
-        _ -> {:error, :unsupported_grant_type}
+      with :ok <- reject_credentials_in_query(conn) do
+        case Map.get(params, "grant_type") do
+          "authorization_code" -> Token.exchange_authorization_code(server, params, opts)
+          "refresh_token" -> Token.exchange_refresh_token(server, params, opts)
+          "client_credentials" -> client_credentials(server, conn, params, opts)
+          type when type in [nil, ""] -> {:error, :invalid_request}
+          _ -> {:error, :unsupported_grant_type}
+        end
       end
 
     case result do
       {:ok, response} ->
         conn
         |> put_resp_header("content-type", "application/json")
+        # RFC 6749 §5.1 — MUST send Cache-Control: no-store and Pragma: no-cache.
         |> put_resp_header("cache-control", "no-store")
+        |> put_resp_header("pragma", "no-cache")
         |> send_resp(200, Jason.encode!(token_response_json(response)))
         |> halt()
 
@@ -179,6 +186,34 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
 
       {:error, reason} ->
         send_token_error(conn, server, reason)
+    end
+  end
+
+  # RFC 6749 §2.3.1: client credentials MUST NOT be sent in the request URI.
+  # Reject them in the query even when a body is also present.
+  @token_credential_query_params ~w(
+    client_id client_secret client_assertion client_assertion_type
+  )
+
+  defp reject_credentials_in_query(conn) do
+    qp = conn.query_params || %{}
+
+    if Enum.any?(@token_credential_query_params, &Map.has_key?(qp, &1)),
+      do: {:error, :invalid_request},
+      else: :ok
+  end
+
+  # Disabled when the server has no `verify_client_secret` configured. The
+  # credentials come from HTTP Basic or the body; confidential clients may use
+  # either (see `Token.exchange_client_credentials/3`).
+  defp client_credentials(server, conn, params, opts) do
+    if server.client_credentials_enabled?() do
+      with {:ok, client_id, client_secret, _via} <- ClientAuth.credentials(conn, params) do
+        params = Map.merge(params, %{"client_id" => client_id, "client_secret" => client_secret})
+        Token.exchange_client_credentials(server, params, opts)
+      end
+    else
+      {:error, :unsupported_grant_type}
     end
   end
 
@@ -310,16 +345,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   end
 
   defp token_response_json(%{} = response) do
-    %{
+    base = %{
       "access_token" => response.access_token,
       "token_type" => response.token_type,
       "expires_in" => response.expires_in,
       "scope" => response.scope
     }
-    |> then(fn json ->
-      if response.refresh_token,
-        do: Map.put(json, "refresh_token", response.refresh_token),
-        else: json
-    end)
+
+    case Map.get(response, :refresh_token) do
+      nil -> base
+      token -> Map.put(base, "refresh_token", token)
+    end
   end
 end

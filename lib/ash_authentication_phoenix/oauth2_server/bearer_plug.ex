@@ -70,6 +70,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   is the right OAuth semantic — the access token is a delegated grant
   from user → client, distinct from the user's own permissions.
 
+  ## Person-token fingerprint
+
+  Person-delegated tokens mint `sub` as the user id and `client_id` as
+  the OAuth client. Machine (`client_credentials`) tokens mint both to
+  the client id. This plug rejects tokens where `sub == client_id` so a
+  machine token cannot authenticate as a user even if ids collide across
+  resources. Use `ClientBearerPlug` for machine routes.
+
   ### Gating an action on a scope
 
   Use `AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug` after
@@ -198,10 +206,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   defp verify_and_load(server, resource, token) do
     with {:ok, claims} <- Jwt.verify(server, token, resource: resource),
+         :ok <- ensure_person_token(claims),
          {:ok, user} <- load_user(server, claims) do
       {:ok, user, claims}
     end
   end
+
+  # Machine tokens set sub == client_id; person tokens differ.
+  defp ensure_person_token(%{"sub" => sub, "client_id" => client_id})
+       when is_binary(sub) and sub != "" and is_binary(client_id) and client_id != "" and
+              sub != client_id do
+    :ok
+  end
+
+  defp ensure_person_token(_), do: {:error, :not_person_token}
 
   defp load_user(server, %{"sub" => sub} = claims) when is_binary(sub) and sub != "" do
     opts =
@@ -250,6 +268,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
       :invalid_audience -> {"invalid_token", "audience mismatch"}
       :invalid_issuer -> {"invalid_token", "issuer mismatch"}
       :expired -> {"invalid_token", "token expired"}
+      :not_person_token -> {"invalid_token", "not a user access token"}
       _ -> {"invalid_token", nil}
     end
   end
