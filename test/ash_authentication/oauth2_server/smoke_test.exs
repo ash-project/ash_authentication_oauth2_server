@@ -40,7 +40,9 @@ defmodule AshAuthentication.Oauth2Server.SmokeTest do
       access_token_lifetime: {15, :minutes},
       refresh_token_lifetime: {7, :days},
       scopes: ["mcp", "read"],
-      dcr_enabled?: true
+      dcr_enabled?: true,
+      # Opt out so this smoke suite covers the disabled-CC metadata path.
+      verify_client_secret: nil
   end
 
   describe "configuration resolution" do
@@ -104,6 +106,28 @@ defmodule AshAuthentication.Oauth2Server.SmokeTest do
 
       assert {:ok, verified} = Jwt.verify(TestServer, token)
       assert verified["sub"] == "user-123"
+    end
+
+    test "extra_claims cannot override reserved protocol claims" do
+      assert {:ok, _token, claims} =
+               Jwt.mint(TestServer,
+                 sub: "user-123",
+                 client_id: "client-abc",
+                 scope: "mcp",
+                 extra_claims: %{
+                   "aud" => "https://attacker.example.com",
+                   "sub" => "other-user",
+                   "scope" => "admin",
+                   "exp" => 1,
+                   "org_id" => "kept"
+                 }
+               )
+
+      assert claims["aud"] == TestServer.resource_url()
+      assert claims["sub"] == "user-123"
+      assert claims["scope"] == "mcp"
+      assert claims["exp"] > 1
+      assert claims["org_id"] == "kept"
     end
 
     test "tokens with the wrong audience are rejected" do
@@ -215,8 +239,29 @@ defmodule AshAuthentication.Oauth2Server.SmokeTest do
       assert doc["registration_endpoint"] == issuer <> "/oauth/register"
       assert doc["revocation_endpoint"] == issuer <> "/oauth/revoke"
       assert doc["response_types_supported"] == ["code"]
-      assert doc["grant_types_supported"] == ["authorization_code", "refresh_token"]
+      # TestServer / Oauth2ServerTest.Server set `verify_client_secret: nil`.
+      assert doc["grant_types_supported"] == [
+               "authorization_code",
+               "refresh_token"
+             ]
       assert doc["code_challenge_methods_supported"] == ["S256"]
+      assert doc["token_endpoint_auth_methods_supported"] == ["none"]
+    end
+
+    test "authorization_server/1 advertises client_credentials by default" do
+      doc = Metadata.authorization_server(Oauth2ServerTest.MachineServer)
+
+      assert doc["grant_types_supported"] == [
+               "authorization_code",
+               "refresh_token",
+               "client_credentials"
+             ]
+
+      assert doc["token_endpoint_auth_methods_supported"] == [
+               "none",
+               "client_secret_basic",
+               "client_secret_post"
+             ]
     end
 
     test "authorization_server/1 omits registration_endpoint when DCR is disabled" do

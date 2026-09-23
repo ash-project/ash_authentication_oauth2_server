@@ -27,6 +27,9 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
 
   @signer_alg "HS256"
 
+  # Must never be overridden by `:extra_claims` / `:extra_access_token_claims`.
+  @reserved_claims ~w(iss sub aud client_id scope iat nbf exp jti tenant)
+
   @doc """
   Mint a new access token.
 
@@ -40,6 +43,10 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
       `"tenant"` claim so the resource server can re-set the Ash tenant
       on the conn via `BearerPlug`. Multi-tenant deployments need this;
       single-tenant deployments can ignore it.
+    * `:extra_claims` — map of additional string-keyed claims merged into
+      the token. Reserved claims (`iss`, `sub`, `aud`, `client_id`,
+      `scope`, `iat`, `nbf`, `exp`, `jti`, `tenant`) in this map are
+      dropped so app callbacks cannot weaken binding or lifetimes.
   """
   @spec mint(server :: module(), keyword()) ::
           {:ok, String.t(), map()} | {:error, term()}
@@ -49,11 +56,12 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     scope = Keyword.fetch!(opts, :scope)
     ttl = Keyword.get(opts, :ttl, server.access_token_lifetime())
     tenant = opts[:tenant]
+    extra = opts |> Keyword.get(:extra_claims, %{}) |> Map.new()
     secret_context = secret_context(tenant)
     audience = Keyword.get_lazy(opts, :audience, fn -> server.resource_url(secret_context) end)
     now = System.system_time(:second)
 
-    claims =
+    reserved =
       %{
         "iss" => server.issuer_url(secret_context),
         "sub" => to_string(sub),
@@ -67,6 +75,14 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
       }
       |> maybe_put_tenant(tenant, server.user_resource())
 
+    # Extras first, then reserved — reserved always wins; strip any attempt
+    # to override protocol claims via `:extra_access_token_claims`.
+    claims =
+      extra
+      |> stringify_keys()
+      |> Map.drop(@reserved_claims)
+      |> Map.merge(reserved)
+
     signer = Joken.Signer.create(@signer_alg, server.signing_secret(secret_context))
 
     case Joken.encode_and_sign(claims, signer) do
@@ -75,6 +91,12 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     end
   end
 
+  defp stringify_keys(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), v}
+      {k, v} when is_binary(k) -> {k, v}
+    end)
+  end
   defp secret_context(nil), do: %{}
   defp secret_context(tenant), do: %{tenant: tenant}
 

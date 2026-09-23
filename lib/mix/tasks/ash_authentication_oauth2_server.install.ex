@@ -216,6 +216,8 @@ if Code.ensure_loaded?(Igniter) do
         "--attribute",
         "scope:string:public",
         "--attribute",
+        "client_secret_hash:string:public",
+        "--attribute",
         "cimd_url:string:public",
         "--attribute",
         "last_used_at:utc_datetime_usec:public",
