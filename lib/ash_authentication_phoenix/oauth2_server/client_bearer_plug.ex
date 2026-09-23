@@ -47,82 +47,22 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug do
   """
 
   @behaviour Plug
-  import Plug.Conn
 
   alias AshAuthentication.Oauth2Server.{Jwt, Token}
-  alias AshAuthentication.Phoenix.Oauth2Server.Errors
+  alias AshAuthentication.Phoenix.Oauth2Server.Bearer
 
   @impl Plug
-  def init(opts) do
-    %{
-      server: Keyword.fetch!(opts, :oauth2_server),
-      required?: Keyword.get(opts, :required?, true),
-      scope: opts |> Keyword.get(:scope) |> normalize_scope()
-    }
-  end
-
-  defp normalize_scope(nil), do: nil
-  defp normalize_scope(scope), do: scope |> List.wrap() |> Enum.join(" ")
+  def init(opts), do: Bearer.init_opts(opts)
 
   @impl Plug
-  def call(conn, %{server: server, required?: required?, scope: scope}) do
-    case extract_token(conn) do
-      :no_token when required? ->
-        challenge(conn, server, nil, scope)
+  def call(conn, opts), do: Bearer.call(conn, opts, &verify_and_load/2)
 
-      :no_token ->
-        conn
-
-      {:ok, token} ->
-        case verify_and_load(server, token) do
-          {:ok, client, claims} ->
-            conn
-            |> maybe_set_tenant(claims)
-            |> Ash.PlugHelpers.set_actor(client)
-            |> assign(:oauth_claims, claims)
-
-          {:error, reason} when required? ->
-            challenge(conn, server, reason, scope)
-
-          {:error, _} ->
-            conn
-        end
-    end
-  end
-
-  defp maybe_set_tenant(conn, %{"tenant" => tenant}) when is_binary(tenant) and tenant != "" do
-    Ash.PlugHelpers.set_tenant(conn, tenant)
-  end
-
-  defp maybe_set_tenant(conn, _), do: conn
-
-  defp extract_token(conn) do
-    case get_req_header(conn, "authorization") do
-      [value | _] when is_binary(value) ->
-        case String.split(value, " ", parts: 2) do
-          [scheme, token] ->
-            # OAuth 2.1 / RFC 6750 — "Bearer" is case-insensitive.
-            if String.downcase(scheme) == "bearer" and token != "" do
-              {:ok, token}
-            else
-              :no_token
-            end
-
-          _ ->
-            :no_token
-        end
-
-      _ ->
-        :no_token
-    end
-  end
-
-  defp verify_and_load(server, token) do
-    with {:ok, claims} <- Jwt.verify(server, token),
+  defp verify_and_load(server, resource, token) do
+    with {:ok, claims} <- Jwt.verify(server, token, resource: resource),
          :ok <- ensure_machine_token(claims),
          {:ok, client} <- load_client(server, claims),
          :ok <- ensure_still_eligible(client),
-         :ok <- ensure_scopes_still_allowed(server, client, claims) do
+         :ok <- ensure_scopes_still_allowed(server, resource, client, claims) do
       {:ok, client, claims}
     end
   end
@@ -146,21 +86,21 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug do
     end
   end
 
-  defp ensure_scopes_still_allowed(server, client, %{"scope" => scope}) do
-    if Token.machine_scopes_allowed?(server, client, scope) do
+  defp ensure_scopes_still_allowed(server, resource, client, %{"scope" => scope}) do
+    if Token.machine_scopes_allowed?(server, resource, client, scope) do
       :ok
     else
       {:error, :scopes_no_longer_allowed}
     end
   end
 
-  defp ensure_scopes_still_allowed(_, _, _), do: {:error, :scopes_no_longer_allowed}
+  defp ensure_scopes_still_allowed(_, _, _, _), do: {:error, :scopes_no_longer_allowed}
 
   defp load_client(server, %{"sub" => client_id} = claims)
        when is_binary(client_id) and client_id != "" do
     opts =
       [context: %{private: %{ash_authentication?: true}}]
-      |> maybe_put_tenant_opt(claims)
+      |> Bearer.maybe_put_tenant_opt(claims)
 
     case Ash.get(server.client_resource(), client_id, opts) do
       {:ok, client} -> {:ok, client}
@@ -169,41 +109,4 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug do
   end
 
   defp load_client(_, _), do: {:error, :missing_subject}
-
-  defp maybe_put_tenant_opt(opts, %{"tenant" => tenant}) when is_binary(tenant) and tenant != "",
-    do: Keyword.put(opts, :tenant, tenant)
-
-  defp maybe_put_tenant_opt(opts, _), do: opts
-
-  defp challenge(conn, server, reason, scope) do
-    metadata_url = Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn))
-    {error, error_description} = error_params(reason)
-
-    challenge =
-      Errors.bearer_challenge([
-        {"resource_metadata", metadata_url},
-        {"scope", scope},
-        {"error", error},
-        {"error_description", error_description}
-      ])
-
-    conn
-    |> put_resp_header("www-authenticate", challenge)
-    |> send_resp(401, "")
-    |> halt()
-  end
-
-  defp error_params(reason) do
-    case reason do
-      nil -> {nil, nil}
-      :invalid_audience -> {"invalid_token", "audience mismatch"}
-      :invalid_issuer -> {"invalid_token", "issuer mismatch"}
-      :expired -> {"invalid_token", "token expired"}
-      :client_not_found -> {"invalid_token", "client not found"}
-      :client_not_eligible -> {"invalid_token", "client credentials no longer allowed"}
-      :scopes_no_longer_allowed -> {"invalid_token", "token scopes no longer allowed"}
-      :not_machine_token -> {"invalid_token", "not a client credentials token"}
-      _ -> {"invalid_token", nil}
-    end
-  end
 end

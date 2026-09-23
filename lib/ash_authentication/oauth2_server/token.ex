@@ -71,10 +71,10 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   `token_endpoint_auth_method` of `client_secret_basic` or
   `client_secret_post` both mean “confidential client with a secret”.
-  Either HTTP Basic **or** body credentials are accepted for those rows
-  (Passport/League-style). Dual Basic+body in one request remains
-  `invalid_request` via `ClientAuth`. The registered method is kept for
-  metadata/interop but is not bound to presentation on the wire.
+  Either HTTP Basic **or** body credentials are accepted for those rows.
+  Dual Basic+body in one request remains `invalid_request` via
+  `ClientAuth`. The registered method is kept for metadata/interop but
+  is not bound to presentation on the wire.
   """
   @spec exchange_client_credentials(server :: module(), params :: map(), opts()) ::
           {:ok, token_response()} | {:error, atom()}

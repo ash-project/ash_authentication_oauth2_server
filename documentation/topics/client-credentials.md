@@ -82,8 +82,8 @@ client =
 Prefer `client_secret_basic` or `client_secret_post` on the client row —
 both mean “confidential client with a secret”. Callers may authenticate
 with **either** HTTP Basic **or** form-body credentials regardless of
-which of those two values is stored (Passport/League-style). Use
-`none` only for public clients; those cannot use this grant.
+which of those two values is stored. Use `none` only for public clients;
+those cannot use this grant.
 
 ## Protecting resource-server routes
 
