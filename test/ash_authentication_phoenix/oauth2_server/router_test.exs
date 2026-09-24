@@ -737,6 +737,71 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
     end
   end
 
+  describe "client authentication of public clients (OAuth 2.1 §3.2.2)" do
+    defp post_form(path, params, headers \\ []) do
+      Enum.reduce(
+        headers,
+        conn(:post, path, params)
+        |> put_req_header("content-type", "application/x-www-form-urlencoded"),
+        fn {k, v}, conn -> put_req_header(conn, k, v) end
+      )
+      |> call_protocol()
+    end
+
+    defp refresh_params(client_id, extra \\ %{}) do
+      Map.merge(
+        %{"grant_type" => "refresh_token", "refresh_token" => "bogus", "client_id" => client_id},
+        extra
+      )
+    end
+
+    test "an empty client_secret counts as omitted" do
+      {client_id, _} = create_client_for_authorize()
+      conn = post_form("/token", refresh_params(client_id, %{"client_secret" => ""}))
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_grant"
+    end
+
+    test "a client_secret or client_assertion is invalid_client" do
+      {client_id, _} = create_client_for_authorize()
+
+      for extra <- [%{"client_secret" => "s"}, %{"client_assertion" => "a"}] do
+        conn = post_form("/token", refresh_params(client_id, extra))
+        assert conn.status == 400
+        assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+      end
+    end
+
+    test "Basic authentication is 401 invalid_client with a Basic challenge (§3.2.4)" do
+      {client_id, _} = create_client_for_authorize()
+      basic = [{"authorization", "Basic " <> Base.encode64(client_id <> ":")}]
+
+      for path <- ["/token", "/revoke"] do
+        params = if path == "/token", do: refresh_params(client_id), else: %{"token" => "x"}
+        conn = post_form(path, params, basic)
+
+        assert conn.status == 401, "expected 401 for #{path}"
+        assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+
+        assert [~s|Basic realm="https://app.example.com"|] =
+                 get_resp_header(conn, "www-authenticate")
+      end
+    end
+
+    test "more than one authentication mechanism is invalid_request (§3.2.4)" do
+      {client_id, _} = create_client_for_authorize()
+
+      conn =
+        post_form("/token", refresh_params(client_id, %{"client_secret" => "s"}), [
+          {"authorization", "Basic " <> Base.encode64(client_id <> ":s")}
+        ])
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    end
+  end
+
   describe "Errors.describe_token_error/1" do
     test "maps a reason it does not know to a server error, not a client error" do
       assert {500, "server_error", _} = Errors.describe_token_error(:server_error)

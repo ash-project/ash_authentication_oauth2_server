@@ -125,7 +125,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   post "/token" do
     server = server!(conn.assigns.oauth2_server_router_opts)
     params = conn.params || %{}
-    opts = tenant_opts(conn)
+    opts = client_request_opts(conn)
 
     result =
       case Map.get(params, "grant_type") do
@@ -147,8 +147,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
         Errors.send_oauth_error(conn, 400, "unsupported_grant_type", nil)
 
       {:error, reason} ->
-        {status, code, desc} = Errors.describe_token_error(reason)
-        Errors.send_oauth_error(conn, status, code, desc)
+        send_token_error(conn, server, reason)
     end
   end
 
@@ -160,7 +159,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   post "/revoke" do
     server = server!(conn.assigns.oauth2_server_router_opts)
 
-    case Token.revoke(server, conn.params || %{}, tenant_opts(conn)) do
+    case Token.revoke(server, conn.params || %{}, client_request_opts(conn)) do
       :ok ->
         conn
         |> put_resp_header("cache-control", "no-store")
@@ -181,8 +180,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
         conn |> put_resp_header("cache-control", "no-store") |> send_resp(503, "") |> halt()
 
       {:error, reason} ->
-        {status, code, desc} = Errors.describe_token_error(reason)
-        Errors.send_oauth_error(conn, status, code, desc)
+        send_token_error(conn, server, reason)
     end
   end
 
@@ -203,6 +201,35 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     case Ash.PlugHelpers.get_tenant(conn) do
       nil -> []
       tenant -> [tenant: tenant]
+    end
+  end
+
+  defp client_request_opts(conn) do
+    [authorization_scheme: authorization_scheme(conn)] ++ tenant_opts(conn)
+  end
+
+  defp authorization_scheme(conn) do
+    case Plug.Conn.get_req_header(conn, "authorization") do
+      [header | _] -> header |> String.split(" ", parts: 2) |> hd() |> String.downcase()
+      [] -> nil
+    end
+  end
+
+  # OAuth 2.1 §3.2.4: when a client attempted authentication with the
+  # Authorization header, `invalid_client` MUST be a 401 with a challenge
+  # for the scheme the client used. RFC 7617 §2 requires `realm` in a Basic
+  # challenge.
+  defp send_token_error(conn, server, reason) do
+    case {Errors.describe_token_error(reason), authorization_scheme(conn)} do
+      {{_status, "invalid_client" = code, desc}, "basic"} ->
+        realm = server.issuer_url(secret_context(conn))
+
+        conn
+        |> put_resp_header("www-authenticate", ~s|Basic realm="#{realm}"|)
+        |> Errors.send_oauth_error(401, code, desc)
+
+      {{status, code, desc}, _scheme} ->
+        Errors.send_oauth_error(conn, status, code, desc)
     end
   end
 
