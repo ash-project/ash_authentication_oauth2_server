@@ -16,6 +16,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
   import Plug.Test
   import Plug.Conn
 
+  require Ash.Query
+
   alias AshAuthentication.Oauth2Server.{Jwt, PKCE}
 
   alias AshAuthentication.Phoenix.Oauth2Server.{ConsentRouter, ProtocolRouter}
@@ -378,6 +380,50 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert String.starts_with?(location, redirect_uri <> "?")
     end
 
+    test "keeps the redirect_uri as registered when adding parameters (OAuth 2.1 §2.3)",
+         %{user: user} do
+      for {registered, prefix} <- [
+            {"https://chat.example.com/cb?app=1", "https://chat.example.com/cb?app=1&"},
+            {"https://chat.example.com/cb?", "https://chat.example.com/cb?"},
+            {"https://chat.example.com:443/cb?app=1", "https://chat.example.com:443/cb?app=1&"}
+          ] do
+        {client_id, redirect_uri} = create_client_for_authorize(registered)
+        {_v, challenge} = pkce()
+
+        OAuthConsent
+        |> Ash.Changeset.for_create(:grant, %{
+          user_id: user.id,
+          client_id: client_id,
+          scope: "mcp"
+        })
+        |> Ash.create!()
+
+        conn =
+          conn(
+            :get,
+            "/?" <> URI.encode_query(authorize_query(client_id, redirect_uri, challenge))
+          )
+          |> Ash.PlugHelpers.set_actor(user)
+          |> call_consent()
+
+        [code] =
+          OAuthAuthorizationCode
+          |> Ash.Query.filter(client_id == ^client_id)
+          |> Ash.read!(context: %{private: %{ash_authentication?: true}})
+
+        assert conn.status == 302
+
+        assert get_resp_header(conn, "location") == [
+                 prefix <>
+                   URI.encode_query(%{
+                     "code" => code.id,
+                     "iss" => Server.issuer_url(),
+                     "state" => "csrf-state"
+                   })
+               ]
+      end
+    end
+
     test "never redirects an unknown client", %{user: user} do
       {_v, challenge} = pkce()
 
@@ -565,10 +611,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
 
   # ── helpers ────────────────────────────────────────────────────────────────
 
-  defp create_client_for_authorize do
-    conn = register_client("https://chat.example.com/cb")
+  defp create_client_for_authorize(redirect_uri \\ "https://chat.example.com/cb") do
+    conn = register_client(redirect_uri)
     body = Jason.decode!(conn.resp_body)
-    {body["client_id"], "https://chat.example.com/cb"}
+    {body["client_id"], redirect_uri}
   end
 
   defp authorize_query(client_id, redirect_uri, challenge) do
