@@ -256,8 +256,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
       "access_token" => response.access_token,
       "token_type" => response.token_type,
       "expires_in" => response.expires_in,
-      "refresh_token" => response.refresh_token,
       "scope" => response.scope
     }
+    |> then(fn json ->
+      if response.refresh_token,
+        do: Map.put(json, "refresh_token", response.refresh_token),
+        else: json
+    end)
   end
 end

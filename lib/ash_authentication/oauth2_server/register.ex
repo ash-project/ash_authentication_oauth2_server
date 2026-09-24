@@ -10,6 +10,12 @@ defmodule AshAuthentication.Oauth2Server.Register do
   v1 supports public clients only (PKCE, `token_endpoint_auth_method: "none"`).
   Confidential clients (`client_secret_basic`) are deferred.
 
+  A client receives refresh tokens only if it registers the
+  `refresh_token` grant type. Without `grant_types`, a client gets the
+  RFC 7591 §2 default, `authorization_code` alone. The token endpoint
+  answers `unauthorized_client` when a client uses a grant type that it did
+  not register (OAuth 2.1 §3.2.4).
+
   Registration is open by default — the standard RFC 7591 mode. To gate
   it, set `:initial_access_token` on your `Oauth2Server` module and pass
   the request's bearer token via `opts[:initial_access_token]` when

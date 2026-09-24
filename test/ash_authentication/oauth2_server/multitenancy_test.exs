@@ -60,7 +60,8 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
         TenantedServer,
         %{
           "client_name" => "Test #{tenant}",
-          "redirect_uris" => [redirect_uri]
+          "redirect_uris" => [redirect_uri],
+          "grant_types" => ["authorization_code", "refresh_token"]
         },
         tenant: tenant
       )
