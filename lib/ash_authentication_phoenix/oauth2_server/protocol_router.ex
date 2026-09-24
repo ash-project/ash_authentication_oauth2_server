@@ -145,16 +145,36 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
 
   # ── revocation (RFC 7009) ──────────────────────────────────────────────────
 
-  # Always 200, regardless of whether the token existed or matched the client
-  # — RFC 7009 §2.2 requires the endpoint not to leak token state.
+  # RFC 7009 §2.2: an invalid token is a 200, like a revoked one. Only a bad
+  # request, a token of another client, or a token type the server cannot
+  # revoke is an error.
   post "/revoke" do
     server = server!(conn.assigns.oauth2_server_router_opts)
-    :ok = Token.revoke(server, conn.params || %{}, tenant_opts(conn))
 
-    conn
-    |> put_resp_header("cache-control", "no-store")
-    |> send_resp(200, "")
-    |> halt()
+    case Token.revoke(server, conn.params || %{}, tenant_opts(conn)) do
+      :ok ->
+        conn
+        |> put_resp_header("cache-control", "no-store")
+        |> send_resp(200, "")
+        |> halt()
+
+      {:error, :unsupported_token_type} ->
+        Errors.send_oauth_error(
+          conn,
+          400,
+          "unsupported_token_type",
+          "access tokens cannot be revoked"
+        )
+
+      # RFC 7009 §2.2.1: on a 503 the client must assume that the token
+      # still exists, and may retry.
+      {:error, :server_error} ->
+        conn |> put_resp_header("cache-control", "no-store") |> send_resp(503, "") |> halt()
+
+      {:error, reason} ->
+        {status, code, desc} = Errors.describe_token_error(reason)
+        Errors.send_oauth_error(conn, status, code, desc)
+    end
   end
 
   # ── default ────────────────────────────────────────────────────────────────
