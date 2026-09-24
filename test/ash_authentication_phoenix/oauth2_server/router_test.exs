@@ -123,7 +123,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       for path <- [
             "/.well-known/oauth-authorization-server",
             "/.well-known/openid-configuration",
-            "/.well-known/oauth-protected-resource"
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp"
           ] do
         conn = call_router(conn(:get, path))
         assert conn.status == 200, "expected 200 for #{path}, got #{conn.status}"
@@ -376,6 +377,28 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       [location] = get_resp_header(conn, "location")
       params = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
       assert is_binary(params["code"])
+      refute Map.has_key?(params, "state")
+    end
+
+    test "redirects a state that is not a string without the state", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_v, challenge} = pkce()
+
+      query =
+        client_id
+        |> authorize_query(redirect_uri, challenge)
+        |> Map.delete("state")
+        |> URI.encode_query()
+
+      conn =
+        conn(:get, "/?" <> query <> "&state[x]=y")
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      params = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert params["error"] == "invalid_request"
       refute Map.has_key?(params, "state")
     end
 

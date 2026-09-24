@@ -28,9 +28,9 @@ defmodule AshAuthentication.Oauth2Server do
   end
   ```
 
-  Required keys: `:otp_app`, `:user_resource`, `:issuer_url`, `:resource_url`,
-  `:signing_secret`, `:client_resource`, `:authorization_code_resource`,
-  `:refresh_token_resource`, `:consent_resource`.
+  Required keys: `:otp_app`, `:user_resource`, `:issuer_url`, `:signing_secret`,
+  `:client_resource`, `:authorization_code_resource`, `:refresh_token_resource`,
+  `:consent_resource`, and exactly one of `:resource_url` or `:resources`.
 
   Optional keys (with defaults):
 
@@ -49,6 +49,72 @@ defmodule AshAuthentication.Oauth2Server do
   | `:cimd_fetch_options` | `[]` | Keyword options passed to the fetcher's `fetch/2` — see `AshAuthentication.Oauth2Server.CIMD.ReqFetcher` for the default fetcher's options. |
   | `:sign_in_path` | `nil` | Path to redirect unauthenticated `/oauth/authorize` requests to. When `nil`, returns 401. |
   | `:initial_access_token` | `nil` | When set, `POST /oauth/register` requires the request to present a matching `Authorization: Bearer …` token (RFC 7591 §3). When `nil` (default), dynamic client registration is open — see the trust-model note below. |
+
+  ## Protected resources
+
+  A protected resource is an API that accepts the access tokens this server
+  issues. Its identifier is a URL (RFC 8707 §2, RFC 9728 §1.2), and every
+  access token names exactly one resource in its `aud` claim.
+
+  For a single resource, set `:resource_url`. To protect more than one
+  resource, set `:resources` instead, with one entry for each resource:
+
+  ```elixir
+  scopes: ["mcp", "gql"],
+  resources: [
+    mcp: [url: {MyApp.Secrets, []}, scopes: ["mcp"]],
+    gql: [url: {MyApp.Secrets, []}, scopes: ["gql"]]
+  ]
+  ```
+
+    * `:url` (required) — the resource identifier, for example
+      `https://app.example.com/mcp`. It accepts the same values as the other
+      secrets below. The secret path is `[:resources, name]`.
+    * `:scopes` — the scopes that this resource accepts. It accepts the same
+      values as the server's `:scopes`. Required when you configure more
+      than one resource. With a single resource it defaults to all of the
+      server's scopes.
+
+  With more than one resource, each scope must belong to exactly one
+  resource, and the server's `:scopes` must list all of them. A scope then
+  always identifies its resource (RFC 9068 §5). This matters for consent,
+  which is stored per client and scope: consent to a scope cannot cover a
+  resource that the user did not see on the consent screen. Static scope
+  lists are checked at compile time. Scope lists that functions compute are
+  checked when an authorization request uses them.
+
+  Each grant is bound to one resource. A client selects it with the
+  `resource` parameter (RFC 8707). If a client does not send `resource`, the
+  server selects the resource that the requested scopes belong to (RFC 9068
+  §3). If the scopes belong to more than one resource, the request fails
+  with `invalid_target`.
+
+  A refresh stays bound to the resource of the original grant. A `resource`
+  parameter that names another resource fails with `invalid_target`.
+
+  On the resource side, give the resource name to
+  `AshAuthentication.Phoenix.Oauth2Server.BearerPlug` and
+  `AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug`. Each plug then
+  accepts only tokens for its resource. With more than one resource the
+  option is required, and the plugs raise at init without it:
+
+  ```elixir
+  pipeline :mcp do
+    plug AshAuthentication.Phoenix.Oauth2Server.BearerPlug,
+      oauth2_server: MyApp.Oauth2Server,
+      resource: :mcp
+  end
+
+  pipeline :gql do
+    plug AshAuthentication.Phoenix.Oauth2Server.BearerPlug,
+      oauth2_server: MyApp.Oauth2Server,
+      resource: :gql
+  end
+  ```
+
+  The protocol router serves the RFC 9728 metadata of each resource at
+  `/.well-known/oauth-protected-resource` followed by the path of the
+  resource identifier, for example `/.well-known/oauth-protected-resource/mcp`.
 
   ## Dynamic client registration
 
@@ -102,8 +168,8 @@ defmodule AshAuthentication.Oauth2Server do
 
   ## Secret values
 
-  `:issuer_url`, `:resource_url`, `:signing_secret`, and
-  `:initial_access_token` accept any of:
+  `:issuer_url`, `:resource_url`, the `:url` of each entry in `:resources`,
+  `:signing_secret`, and `:initial_access_token` accept any of:
 
     * a literal string — resolved at compile time
     * a `{Module, opts}` tuple where `Module` implements
@@ -131,7 +197,6 @@ defmodule AshAuthentication.Oauth2Server do
     :otp_app,
     :user_resource,
     :issuer_url,
-    :resource_url,
     :signing_secret,
     :client_resource,
     :authorization_code_resource,
@@ -217,11 +282,44 @@ defmodule AshAuthentication.Oauth2Server do
         |> Oauth2Server.__normalize_url__()
       end
 
-      def resource_url(context \\ %{}) do
+      @doc """
+      The names of the configured protected resources. A server configured
+      with `:resource_url` has one resource, named `:default`.
+      """
+      def resources do
         @oauth2_server_opts
-        |> Keyword.fetch!(:resource_url)
-        |> Oauth2Server.__resolve_secret__!(__MODULE__, [:resource_url], context)
+        |> Oauth2Server.__resources__()
+        |> Enum.map(&elem(&1, 0))
+      end
+
+      @doc """
+      The identifier of a protected resource.
+
+      Takes a resource name, a secret context, or both. A `nil` name selects
+      the only configured resource, and raises if there is more than one.
+      """
+      def resource_url(name_or_context \\ %{})
+      def resource_url(context) when is_map(context), do: resource_url(nil, context)
+      def resource_url(name) when is_atom(name), do: resource_url(name, %{})
+
+      def resource_url(name, context) do
+        {_name, spec, path, _scopes} =
+          Oauth2Server.__fetch_resource__!(__MODULE__, @oauth2_server_opts, name)
+
+        spec
+        |> Oauth2Server.__resolve_secret__!(__MODULE__, path, context)
         |> Oauth2Server.__normalize_url__()
+      end
+
+      @doc """
+      The scopes that a protected resource accepts. A `nil` name selects the
+      only configured resource.
+      """
+      def resource_scopes(name \\ nil) do
+        case Oauth2Server.__fetch_resource__!(__MODULE__, @oauth2_server_opts, name) do
+          {_name, _spec, _path, nil} -> scopes()
+          {_name, _spec, _path, spec} -> Oauth2Server.__resolve_scopes__!(spec, __MODULE__)
+        end
       end
 
       def signing_secret(context \\ %{}) do
@@ -262,6 +360,8 @@ defmodule AshAuthentication.Oauth2Server do
             inspect(missing)
     end
 
+    validate_resources!(module, opts)
+
     case Keyword.fetch!(opts, :otp_app) do
       atom when is_atom(atom) ->
         :ok
@@ -293,6 +393,185 @@ defmodule AshAuthentication.Oauth2Server do
 
     :ok
   end
+
+  defp validate_resources!(module, opts) do
+    case {Keyword.has_key?(opts, :resource_url), Keyword.fetch(opts, :resources)} do
+      {true, :error} ->
+        :ok
+
+      {false, {:ok, [_ | _] = resources}} ->
+        Enum.each(resources, &validate_resource!(module, &1))
+
+        if length(Enum.uniq_by(resources, &elem(&1, 0))) != length(resources) do
+          raise CompileError,
+            description:
+              "#{inspect(module)} configures a resource name in `:resources` more than once"
+        end
+
+        validate_resource_scopes!(module, resources, Keyword.get(opts, :scopes, []))
+
+      {true, {:ok, _}} ->
+        raise CompileError,
+          description:
+            "#{inspect(module)} sets both `:resource_url` and `:resources`. Set only one of them."
+
+      _ ->
+        raise CompileError,
+          description:
+            "#{inspect(module)} must set `:resource_url` or a non-empty `:resources` keyword list"
+    end
+  end
+
+  defp validate_resource!(module, {name, config}) when is_atom(name) and is_list(config) do
+    unless Keyword.has_key?(config, :url) do
+      raise CompileError,
+        description: "#{inspect(module)}: resource #{inspect(name)} in `:resources` has no `:url`"
+    end
+  end
+
+  defp validate_resource!(module, other) do
+    raise CompileError,
+      description:
+        "#{inspect(module)}: expected each entry in `:resources` to be `name: [url: ...]`, " <>
+          "got: #{inspect(other)}"
+  end
+
+  # With more than one resource, every scope must belong to exactly one of
+  # them (RFC 9068 §5). Consent is stored per client and scope, so a shared
+  # scope would let consent for one resource cover another. Scope lists
+  # given as functions are checked when they are resolved.
+  defp validate_resource_scopes!(_module, [_single], _server_scopes), do: :ok
+
+  defp validate_resource_scopes!(module, resources, server_scopes) do
+    Enum.each(resources, fn {name, config} ->
+      unless Keyword.has_key?(config, :scopes) do
+        raise CompileError,
+          description:
+            "#{inspect(module)}: resource #{inspect(name)} has no `:scopes`. " <>
+              "Each of several resources must declare its own scopes."
+      end
+    end)
+
+    lists = Enum.map(resources, fn {name, config} -> {name, config[:scopes]} end)
+
+    if Enum.all?(lists, fn {_name, scopes} -> is_list(scopes) end) do
+      __check_disjoint_scopes__!(module, lists, CompileError)
+
+      if is_list(server_scopes) do
+        case Enum.flat_map(lists, &elem(&1, 1)) -- server_scopes do
+          [] ->
+            :ok
+
+          [scope | _] ->
+            raise CompileError,
+              description:
+                "#{inspect(module)}: resource scope #{inspect(scope)} is not in `:scopes`"
+        end
+      end
+    end
+
+    :ok
+  end
+
+  @doc false
+  def __check_disjoint_scopes__!(module, lists, exception \\ ArgumentError) do
+    lists
+    |> Enum.flat_map(fn {name, scopes} -> Enum.map(scopes, &{&1, name}) end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.find(fn {_scope, names} -> length(names) > 1 end)
+    |> case do
+      nil ->
+        :ok
+
+      {scope, names} ->
+        message =
+          "#{inspect(module)}: scope #{inspect(scope)} belongs to more than one resource " <>
+            "(#{Enum.map_join(names, ", ", &inspect/1)}). Each scope must belong to one resource."
+
+        if exception == CompileError,
+          do: raise(CompileError, description: message),
+          else: raise(ArgumentError, message)
+    end
+  end
+
+  @doc false
+  # Each resource as `{name, url_spec, secret_path, scopes_spec}`. A server
+  # configured with `:resource_url` keeps `[:resource_url]` as the secret path,
+  # so existing `AshAuthentication.Secret` implementations keep working.
+  def __resources__(opts) do
+    case Keyword.fetch(opts, :resources) do
+      {:ok, resources} ->
+        Enum.map(resources, fn {name, config} ->
+          {name, Keyword.fetch!(config, :url), [:resources, name], config[:scopes]}
+        end)
+
+      :error ->
+        [{:default, Keyword.fetch!(opts, :resource_url), [:resource_url], nil}]
+    end
+  end
+
+  @doc false
+  def __fetch_resource__!(module, opts, nil) do
+    case __resources__(opts) do
+      [resource] ->
+        resource
+
+      resources ->
+        raise ArgumentError,
+              "#{inspect(module)} configures more than one resource. " <>
+                "Give the name of a resource: #{inspect(Enum.map(resources, &elem(&1, 0)))}"
+    end
+  end
+
+  def __fetch_resource__!(module, opts, name) do
+    resources = __resources__(opts)
+
+    List.keyfind(resources, name, 0) ||
+      raise ArgumentError,
+            "#{inspect(module)} has no resource named #{inspect(name)}. " <>
+              "Configured resources: #{inspect(Enum.map(resources, &elem(&1, 0)))}"
+  end
+
+  @doc false
+  # Plug option check: a plug on a server with several resources must name
+  # one, and the name must be configured. Raises at plug init, which Phoenix
+  # runs when the router compiles.
+  def __check_resource_option__!(server, resource) do
+    case {server.resources(), resource} do
+      {[_single], nil} ->
+        :ok
+
+      {resources, nil} ->
+        raise ArgumentError,
+              "#{inspect(server)} configures more than one resource. " <>
+                "Set the `:resource` option to one of #{inspect(resources)}."
+
+      {resources, name} ->
+        if name in resources,
+          do: :ok,
+          else:
+            raise(
+              ArgumentError,
+              "#{inspect(server)} has no resource named #{inspect(name)}. " <>
+                "Configured resources: #{inspect(resources)}"
+            )
+    end
+  end
+
+  @doc false
+  # Find the configured resource whose identifier equals `url` after URL
+  # normalization. Returns `{:ok, name, canonical_url}` or `:error`.
+  def __find_resource__(server, url, context \\ %{})
+
+  def __find_resource__(server, url, context) when is_binary(url) do
+    normalized = __normalize_url__(url)
+
+    Enum.find_value(server.resources(), :error, fn name ->
+      if server.resource_url(name, context) == normalized, do: {:ok, name, normalized}
+    end)
+  end
+
+  def __find_resource__(_server, _url, _context), do: :error
 
   @doc false
   # Runs via @after_verify on every `use AshAuthentication.Oauth2Server` module.

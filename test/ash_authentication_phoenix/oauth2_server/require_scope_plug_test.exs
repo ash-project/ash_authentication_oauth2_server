@@ -22,7 +22,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlugTest do
   @injection ~s|victim", scope="admin", filler="x|
 
   # A server whose resource_url bakes in the (request-derived) tenant, like a
-  # typical multi-tenant app. The challenge paths only call resource_url/1, so
+  # typical multi-tenant app. The challenge paths only call resource_url/2, so
   # this stand-in is enough to drive the tenant into the emitted header.
   defmodule InjectionServer do
     @moduledoc false
@@ -30,6 +30,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlugTest do
       do: "https://#{tenant}.app.example.com/mcp"
 
     def resource_url(_), do: "https://app.example.com/mcp"
+
+    def resource_url(_resource, context), do: resource_url(context)
+
+    def resources, do: [:default]
   end
 
   setup do
@@ -79,7 +83,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlugTest do
       assert challenge =~ ~s|scope="mcp.read mcp.write"|
 
       assert challenge =~
-               ~s|resource_metadata="https://app.example.com/.well-known/oauth-protected-resource"|
+               ~s|resource_metadata="https://app.example.com/.well-known/oauth-protected-resource/mcp"|
 
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "insufficient_scope"
