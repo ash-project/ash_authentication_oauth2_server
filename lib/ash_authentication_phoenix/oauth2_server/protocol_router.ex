@@ -10,7 +10,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   Endpoints handled:
 
     * `GET /oauth-authorization-server` — RFC 8414 metadata
-    * `GET /oauth-protected-resource`   — RFC 9728 metadata
+    * `GET /oauth-protected-resource[/<path>]` — RFC 9728 metadata, one
+      document for each configured resource
     * `GET /openid-configuration`       — alias for OIDC-conformant tooling
     * `POST /register`                  — RFC 7591 Dynamic Client Registration
     * `POST /token`                     — authorization_code + refresh_token grants
@@ -43,8 +44,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   # the `/.well-known` mount (see the `well_known?` forward in the Router).
   @well_known_paths [
     ["oauth-authorization-server"],
-    ["openid-configuration"],
-    ["oauth-protected-resource"]
+    ["openid-configuration"]
   ]
 
   # This router is forwarded at both `/oauth` (full route table) and
@@ -55,27 +55,58 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   defp restrict_well_known_mount(conn, _opts) do
     well_known? = Keyword.get(conn.assigns.oauth2_server_router_opts, :well_known?, false)
 
-    if well_known? and not (conn.method == "GET" and conn.path_info in @well_known_paths) do
+    if well_known? and not (conn.method == "GET" and well_known_path?(conn.path_info)) do
       conn |> send_resp(404, "") |> halt()
     else
       conn
     end
   end
 
+  defp well_known_path?(["oauth-protected-resource" | _]), do: true
+  defp well_known_path?(path_info), do: path_info in @well_known_paths
+
   # ── metadata ───────────────────────────────────────────────────────────────
 
   get("/oauth-authorization-server", do: serve_authorization_server_metadata(conn))
   get("/openid-configuration", do: serve_authorization_server_metadata(conn))
 
+  # RFC 9728 §3.1 puts the document for `https://host/mcp` at
+  # `/.well-known/oauth-protected-resource/mcp`.
   # sobelow_skip ["XSS.SendResp"]
-  get "/oauth-protected-resource" do
+  get "/oauth-protected-resource/*resource_path" do
     server = server!(conn.assigns.oauth2_server_router_opts)
+    context = secret_context(conn)
 
-    conn
-    |> put_resp_header("content-type", "application/json")
-    |> put_resp_header("cache-control", metadata_cache_control(conn))
-    |> send_resp(200, Jason.encode!(Metadata.protected_resource(server, secret_context(conn))))
-    |> halt()
+    case resource_for_path(server, context, conn, resource_path) do
+      {:ok, resource} ->
+        conn
+        |> put_resp_header("content-type", "application/json")
+        |> put_resp_header("cache-control", metadata_cache_control(conn))
+        |> send_resp(200, Jason.encode!(Metadata.protected_resource(server, context, resource)))
+        |> halt()
+
+      :error ->
+        conn |> send_resp(404, "") |> halt()
+    end
+  end
+
+  # A server with one resource also answers at the host root, whatever the
+  # resource path. MCP clients fall back to the root when the path-suffixed
+  # URL fails.
+  defp resource_for_path(server, context, conn, resource_path) do
+    case {server.resources(), resource_path} do
+      {[resource], []} ->
+        {:ok, resource}
+
+      {resources, _} ->
+        Enum.find_value(resources, :error, fn resource ->
+          %URI{path: path, query: query} = URI.parse(server.resource_url(resource, context))
+
+          if String.split(path || "", "/", trim: true) == resource_path and
+               conn.query_string == (query || ""),
+             do: {:ok, resource}
+        end)
+    end
   end
 
   # ── DCR ────────────────────────────────────────────────────────────────────

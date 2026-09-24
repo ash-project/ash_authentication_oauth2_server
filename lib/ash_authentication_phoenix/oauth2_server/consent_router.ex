@@ -221,9 +221,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     end
   end
 
-  defp maybe_put_param(map, _key, nil), do: map
-  defp maybe_put_param(map, _key, ""), do: map
-  defp maybe_put_param(map, key, value), do: Map.put(map, key, value)
+  defp maybe_put_param(map, key, value) when is_binary(value) and value != "",
+    do: Map.put(map, key, value)
+
+  defp maybe_put_param(map, _key, _value), do: map
 
   defp tenant_opts(conn) do
     case Ash.PlugHelpers.get_tenant(conn) do

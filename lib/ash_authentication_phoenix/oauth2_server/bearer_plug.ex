@@ -20,6 +20,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   ## Options
 
     * `:oauth2_server` (required) — your `Oauth2Server` config module
+    * `:resource` — the name of the protected resource that this plug
+      guards. The plug accepts only tokens whose `aud` names this resource,
+      and its challenges point at this resource's metadata. Required when the
+      server configures more than one resource.
     * `:required?` (default `true`) — when `false`, missing/invalid tokens
       pass through unchanged instead of returning 401. Useful for routes
       that should serve unauthenticated users with a different (e.g.
@@ -114,8 +118,13 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   @impl Plug
   def init(opts) do
+    server = Keyword.fetch!(opts, :oauth2_server)
+    resource = Keyword.get(opts, :resource)
+    AshAuthentication.Oauth2Server.__check_resource_option__!(server, resource)
+
     %{
-      server: Keyword.fetch!(opts, :oauth2_server),
+      server: server,
+      resource: resource,
       required?: Keyword.get(opts, :required?, true),
       scope: opts |> Keyword.get(:scope) |> normalize_scope()
     }
@@ -125,22 +134,22 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   defp normalize_scope(scope), do: scope |> List.wrap() |> Enum.join(" ")
 
   @impl Plug
-  def call(conn, %{server: server, required?: required?, scope: scope}) do
+  def call(conn, %{server: server, resource: resource, required?: required?, scope: scope}) do
     case extract_token(conn) do
       :no_token when required? ->
-        challenge(conn, server, nil, scope)
+        challenge(conn, server, resource, nil, scope)
 
       :no_token ->
         conn
 
       :malformed when required? ->
-        challenge(conn, server, :malformed, scope)
+        challenge(conn, server, resource, :malformed, scope)
 
       :malformed ->
         conn
 
       {:ok, token} ->
-        case verify_and_load(server, token) do
+        case verify_and_load(server, resource, token) do
           {:ok, user, claims} ->
             conn
             |> maybe_set_tenant(claims)
@@ -148,7 +157,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
             |> assign(:oauth_claims, claims)
 
           {:error, reason} when required? ->
-            challenge(conn, server, reason, scope)
+            challenge(conn, server, resource, reason, scope)
 
           {:error, _} ->
             conn
@@ -187,8 +196,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
     end
   end
 
-  defp verify_and_load(server, token) do
-    with {:ok, claims} <- Jwt.verify(server, token),
+  defp verify_and_load(server, resource, token) do
+    with {:ok, claims} <- Jwt.verify(server, token, resource: resource),
          {:ok, user} <- load_user(server, claims) do
       {:ok, user, claims}
     end
@@ -212,9 +221,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   defp maybe_put_tenant_opt(opts, _), do: opts
 
-  defp challenge(conn, server, reason, scope) do
+  defp challenge(conn, server, resource, reason, scope) do
     status = if reason == :malformed, do: 400, else: 401
-    metadata_url = Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn))
+
+    metadata_url =
+      Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn), resource)
+
     {error, error_description} = error_params(reason)
 
     challenge =

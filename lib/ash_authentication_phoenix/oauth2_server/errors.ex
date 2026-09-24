@@ -95,7 +95,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   Options:
 
     * `:description` — human-readable `error_description`
-    * `:tenant` — forwarded to the server's `resource_url/1` resolution
+    * `:tenant` — forwarded to the server's `resource_url/2` resolution
+    * `:resource` — the name of the protected resource. Defaults to the only
+      configured resource.
   """
   # sobelow_skip ["XSS.SendResp"]
   @spec send_insufficient_scope(Plug.Conn.t(), module(), [String.t()] | String.t(), keyword()) ::
@@ -108,7 +110,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       bearer_challenge([
         {"error", "insufficient_scope"},
         {"scope", scope},
-        {"resource_metadata", resource_metadata_url(server, Keyword.get(opts, :tenant))},
+        {"resource_metadata",
+         resource_metadata_url(server, Keyword.get(opts, :tenant), Keyword.get(opts, :resource))},
         {"error_description", description}
       ])
 
@@ -125,20 +128,26 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   end
 
   @doc """
-  The URL of the protected-resource metadata document (RFC 9728) for this
-  server — the value of the `resource_metadata` parameter in
-  `WWW-Authenticate` challenges. PRM lives at the host root per RFC 9728,
-  so path/query are stripped from the configured resource URL.
-  """
-  @spec resource_metadata_url(module(), any()) :: String.t()
-  def resource_metadata_url(server, tenant \\ nil) do
-    context = if tenant, do: %{tenant: tenant}, else: %{}
+  The URL of the protected-resource metadata document (RFC 9728) for a
+  protected resource — the value of the `resource_metadata` parameter in
+  `WWW-Authenticate` challenges. Per RFC 9728 §3.1 the well-known suffix goes
+  between the host and the path of the resource identifier, so
+  `https://host/mcp` maps to `https://host/.well-known/oauth-protected-resource/mcp`.
 
-    server.resource_url(context)
-    |> URI.parse()
-    |> Map.merge(%{path: "/.well-known/oauth-protected-resource", query: nil, fragment: nil})
+  `resource` is the name of a configured resource, and defaults to the only
+  configured resource.
+  """
+  @spec resource_metadata_url(module(), any(), atom() | nil) :: String.t()
+  def resource_metadata_url(server, tenant \\ nil, resource \\ nil) do
+    context = if tenant, do: %{tenant: tenant}, else: %{}
+    uri = URI.parse(server.resource_url(resource, context))
+
+    %{uri | path: "/.well-known/oauth-protected-resource" <> resource_path(uri), fragment: nil}
     |> URI.to_string()
   end
+
+  defp resource_path(%URI{path: path}) when path in [nil, "/"], do: ""
+  defp resource_path(%URI{path: path}), do: path
 
   @doc """
   Translate a `:reason` atom returned from a core module into an
@@ -154,7 +163,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       :reuse -> {400, "invalid_grant", "code or refresh token already used"}
       :expired -> {400, "invalid_grant", "expired"}
       :pkce -> {400, "invalid_grant", "PKCE verification failed"}
-      :resource_mismatch -> {400, "invalid_grant", "grant was issued for a different resource"}
+      :resource_mismatch -> {400, "invalid_grant", "grant resource is not configured"}
       :invalid_target -> {400, "invalid_target", "requested resource is not acceptable"}
       :redirect_mismatch -> {400, "invalid_grant", "redirect_uri mismatch"}
       :invalid_code -> {400, "invalid_grant", "code not found or invalid"}
