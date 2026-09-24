@@ -82,6 +82,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
              sub: code.user_id,
              client_id: presented_client_id,
              scope: code.scope,
+             resource: code.resource_uri,
              tenant: tenant
            ),
          {:ok, refresh_token} <- maybe_issue_refresh_token(server, client, code, opts) do
@@ -231,20 +232,17 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp verify_pkce(_, _), do: {:error, :pkce}
 
-  # `resource` is optional per RFC 8707 §2. A code bound to another
-  # resource is a bad grant. An unacceptable requested value is
-  # `invalid_target`, which RFC 8707 §2 defines for this case.
+  # `resource` is optional per RFC 8707 §2. A code bound to a resource that
+  # is no longer configured is a bad grant. A requested value other than the
+  # code's resource is `invalid_target`, which RFC 8707 §2 defines for this
+  # case.
   defp check_resource_match(server, params, code, secret_context) do
-    expected = server.resource_url(secret_context)
-
     cond do
-      code.resource_uri != expected ->
+      code.resource_uri not in resource_urls(server, secret_context) ->
         {:error, :resource_mismatch}
 
-      is_binary(params["resource"]) and params["resource"] != "" ->
-        if AshAuthentication.Oauth2Server.__normalize_url__(params["resource"]) == expected,
-          do: :ok,
-          else: {:error, :invalid_target}
+      not requested_resource_ok?(params["resource"], code.resource_uri) ->
+        {:error, :invalid_target}
 
       true ->
         :ok
@@ -292,7 +290,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   defp do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts) do
     hash = hash_refresh(raw)
     resource = Map.get(params, "resource")
-    expected_resource = server.resource_url(secret_context(Keyword.get(opts, :tenant)))
+    resource_urls = resource_urls(server, secret_context(Keyword.get(opts, :tenant)))
 
     # Allocate the new refresh row's identifiers upfront so the rotate
     # can atomically set `rotated_to_id = ^new_id` without a separate
@@ -301,15 +299,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
     new_id = Ash.UUIDv7.generate()
 
     with {:ok, scope} <-
-           requested_scope(server, hash, params, client_id, expected_resource, resource, opts) do
+           requested_scope(server, hash, params, client_id, resource_urls, resource, opts) do
       new_refresh = {new_id, new_hash, new_raw}
 
-      case atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
+      case atomic_rotate(server, hash, client_id, resource, resource_urls, new_id, opts) do
         {:ok, old_row} ->
           complete_rotation(server, old_row, scope, presented_client_id, new_refresh, opts)
 
         :no_match ->
-          case disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
+          case disambiguate_failure(server, hash, client_id, resource_urls, resource, opts) do
             :reuse ->
               revoke_chain_by_hash(server, hash, opts)
               {:error, :reuse}
@@ -343,13 +341,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
   #   * `{:bulk_error, errors}` — the bulk update itself failed for a
   #     real reason (validation, constraint, etc.). The caller logs
   #     and returns a server error without disambiguating.
-  defp atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
-    if requested_resource_ok?(resource, expected_resource),
-      do: do_atomic_rotate(server, hash, client_id, expected_resource, new_id, opts),
-      else: :no_match
+  defp atomic_rotate(server, hash, client_id, resource, resource_urls, new_id, opts) do
+    case Enum.filter(resource_urls, &requested_resource_ok?(resource, &1)) do
+      [] -> :no_match
+      allowed -> do_atomic_rotate(server, hash, client_id, allowed, new_id, opts)
+    end
   end
 
-  defp do_atomic_rotate(server, hash, client_id, expected_resource, new_id, opts) do
+  defp do_atomic_rotate(server, hash, client_id, allowed_resources, new_id, opts) do
     now = DateTime.utc_now()
 
     bulk_opts =
@@ -360,7 +359,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
     |> Ash.Query.filter(
       token_hash == ^hash and
         client_id == ^client_id and
-        resource_uri == ^expected_resource and
+        resource_uri in ^allowed_resources and
         expires_at > ^now and
         is_nil(rotated_to_id) and
         is_nil(revoked_at)
@@ -406,6 +405,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
              sub: old_row.user_id,
              client_id: presented_client_id,
              scope: access_scope,
+             resource: old_row.resource_uri,
              tenant: tenant
            ) do
       touch_client_by_id(server, old_row.client_id, opts)
@@ -426,9 +426,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # the chain-revoke decision (only `:reuse` triggers revocation).
   # We could do this with errors on the bulk_update's filter instead
   # but not all data layers support that
-  defp disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
+  defp disambiguate_failure(server, hash, client_id, resource_urls, resource, opts) do
     case find_refresh(server, hash, opts) do
-      {:ok, row} -> classify_row(row, client_id, expected_resource, resource) || :invalid_refresh
+      {:ok, row} -> classify_row(row, client_id, resource_urls, resource) || :invalid_refresh
       {:error, _} -> :invalid_refresh
     end
   end
@@ -438,12 +438,12 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # scope reads the row first. Only a token that passes every other check
   # gets the scope error. A failing token takes the rotate path, which
   # reports its own error and detects reuse.
-  defp requested_scope(server, hash, params, client_id, expected_resource, resource, opts) do
+  defp requested_scope(server, hash, params, client_id, resource_urls, resource, opts) do
     requested = String.split(params["scope"] || "", " ", trim: true)
 
     with [_ | _] <- requested,
          {:ok, row} <- find_refresh(server, hash, opts),
-         nil <- classify_row(row, client_id, expected_resource, resource) do
+         nil <- classify_row(row, client_id, resource_urls, resource) do
       granted = String.split(row.scope, " ", trim: true)
 
       if Enum.all?(requested, &(&1 in granted)),
@@ -458,14 +458,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # which client or resource the request names, so it must reach `:reuse`
   # and revoke the chain (OAuth 2.1 §4.3.1). A dead token is `invalid_grant`
   # even when the requested resource is also wrong.
-  defp classify_row(row, client_id, expected_resource, resource) do
+  defp classify_row(row, client_id, resource_urls, resource) do
     cond do
       row.revoked_at -> :revoked
       row.rotated_to_id -> :reuse
       DateTime.compare(DateTime.utc_now(), row.expires_at) == :gt -> :expired
       row.client_id != client_id -> :client_mismatch
-      row.resource_uri != expected_resource -> :resource_mismatch
-      not requested_resource_ok?(resource, expected_resource) -> :invalid_target
+      row.resource_uri not in resource_urls -> :resource_mismatch
+      not requested_resource_ok?(resource, row.resource_uri) -> :invalid_target
       true -> nil
     end
   end
@@ -518,10 +518,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   defp revoke_access_token(server, token) do
-    case Jwt.verify(server, token) do
-      {:ok, _claims} -> {:error, :unsupported_token_type}
-      {:error, _} -> :ok
-    end
+    if Enum.any?(server.resources(), &match?({:ok, _}, Jwt.verify(server, token, resource: &1))),
+      do: {:error, :unsupported_token_type},
+      else: :ok
   end
 
   defp find_refresh(server, hash, opts) do
@@ -537,7 +536,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   # `resource` is optional per RFC 8707 §2 — when absent (`nil` or empty
   # string) we don't enforce, otherwise it must canonicalize to the
-  # server's resource URL.
+  # resource the grant is bound to.
   defp requested_resource_ok?(nil, _expected), do: true
   defp requested_resource_ok?("", _expected), do: true
 
@@ -546,6 +545,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   defp requested_resource_ok?(_, _), do: false
+
+  defp resource_urls(server, secret_context),
+    do: Enum.map(server.resources(), &server.resource_url(&1, secret_context))
 
   # On reuse detection, revoke every refresh token in the chain in a
   # single filtered UPDATE. RFC 6749 §4.3.1. Every row in a rotation

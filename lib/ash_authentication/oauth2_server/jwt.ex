@@ -14,8 +14,8 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
   Both modules wrap Joken. They are kept separate because:
 
     * **Audience binding (RFC 8707)** — every minted token carries an `aud`
-      matching the configured `resource_url`, and `verify/2` rejects tokens
-      whose `aud` doesn't match. `AshAuthentication.Jwt`'s `aud` is
+      that names one configured protected resource, and `verify/3` rejects
+      tokens whose `aud` does not name the resource that verifies them. `AshAuthentication.Jwt`'s `aud` is
       hardcoded to a version constraint and is not customizable per-token.
     * **Hot-path verify** — the resource server validates a token on every
       protected request. Verify here is signature + claims only, no user
@@ -34,6 +34,8 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
   Optional:
 
     * `:ttl` — seconds; defaults to the server's `access_token_lifetime`.
+    * `:resource` — the resource identifier for the `aud` claim. Defaults
+      to the only configured resource.
     * `:tenant` — when present (and non-nil), baked into the token as a
       `"tenant"` claim so the resource server can re-set the Ash tenant
       on the conn via `BearerPlug`. Multi-tenant deployments need this;
@@ -48,13 +50,14 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     ttl = Keyword.get(opts, :ttl, server.access_token_lifetime())
     tenant = opts[:tenant]
     secret_context = secret_context(tenant)
+    resource = Keyword.get_lazy(opts, :resource, fn -> server.resource_url(secret_context) end)
     now = System.system_time(:second)
 
     claims =
       %{
         "iss" => server.issuer_url(secret_context),
         "sub" => to_string(sub),
-        "aud" => server.resource_url(secret_context),
+        "aud" => resource,
         "client_id" => to_string(client_id),
         "scope" => scope,
         "iat" => now,
@@ -96,24 +99,32 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
   by an AS whose clock is slightly off from the resource server still
   verify.
 
+  Options:
+
+    * `:resource` — the name of the protected resource that verifies the
+      token. The `aud` claim must name this resource. Defaults to the only
+      configured resource.
+
   Returns `{:ok, claims}` on success or `{:error, reason}` on failure.
   """
-  @spec verify(server :: module(), String.t()) :: {:ok, map()} | {:error, term()}
-  def verify(server, token) when is_binary(token) do
+  @spec verify(server :: module(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def verify(server, token, opts \\ [])
+
+  def verify(server, token, opts) when is_binary(token) do
     signer = Joken.Signer.create(@signer_alg, server.signing_secret())
     skew = server.clock_skew_seconds()
 
     with {:ok, claims} <- Joken.verify(token, signer),
          secret_context <- secret_context(claims["tenant"]),
          :ok <- check_iss(claims, server, secret_context),
-         :ok <- check_aud(claims, server, secret_context),
+         :ok <- check_aud(claims, server, opts[:resource], secret_context),
          :ok <- check_nbf(claims, skew),
          :ok <- check_exp(claims, skew) do
       {:ok, claims}
     end
   end
 
-  def verify(_, _), do: {:error, :invalid_token}
+  def verify(_, _, _), do: {:error, :invalid_token}
 
   defp check_iss(%{"iss" => iss}, server, secret_context) do
     if iss == server.issuer_url(secret_context), do: :ok, else: {:error, :invalid_issuer}
@@ -121,8 +132,8 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
 
   defp check_iss(_, _, _), do: {:error, :invalid_issuer}
 
-  defp check_aud(%{"aud" => aud}, server, secret_context) do
-    expected = server.resource_url(secret_context)
+  defp check_aud(%{"aud" => aud}, server, resource, secret_context) do
+    expected = server.resource_url(resource, secret_context)
 
     cond do
       aud == expected -> :ok
@@ -131,7 +142,7 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     end
   end
 
-  defp check_aud(_, _, _), do: {:error, :invalid_audience}
+  defp check_aud(_, _, _, _), do: {:error, :invalid_audience}
 
   defp check_exp(%{"exp" => exp}, skew) when is_integer(exp) do
     if System.system_time(:second) < exp + skew, do: :ok, else: {:error, :expired}

@@ -6,8 +6,9 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
   @moduledoc """
   Builders for the discovery metadata endpoints.
 
-    * `protected_resource/1` (RFC 9728) — for the resource server, served at
-      `/.well-known/oauth-protected-resource`.
+    * `protected_resource/3` (RFC 9728) — for a protected resource, served at
+      `/.well-known/oauth-protected-resource` followed by the path of the
+      resource identifier.
     * `authorization_server/1` (RFC 8414) — for the authorization server,
       served at `/.well-known/oauth-authorization-server`.
 
@@ -17,16 +18,18 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
   @doc """
   Build the OAuth Protected Resource Metadata document (RFC 9728).
 
-  `context` is forwarded to the server's `resource_url/1` and `issuer_url/1`
+  `context` is forwarded to the server's `resource_url/2` and `issuer_url/1`
   callbacks so per-request (e.g. per-tenant) resolution works. Single-tenant
-  callers can pass `%{}`.
+  callers can pass `%{}`. `resource` is the name of a configured resource,
+  and defaults to the only configured resource.
   """
-  @spec protected_resource(server :: module(), context :: map()) :: map()
-  def protected_resource(server, context \\ %{}) do
+  @spec protected_resource(server :: module(), context :: map(), resource :: atom() | nil) ::
+          map()
+  def protected_resource(server, context \\ %{}, resource \\ nil) do
     %{
-      "resource" => server.resource_url(context),
+      "resource" => server.resource_url(resource, context),
       "authorization_servers" => [server.issuer_url(context)],
-      "scopes_supported" => server.scopes(),
+      "scopes_supported" => server.resource_scopes(resource),
       "bearer_methods_supported" => ["header"]
     }
   end

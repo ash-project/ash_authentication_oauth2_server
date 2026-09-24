@@ -123,7 +123,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       for path <- [
             "/.well-known/oauth-authorization-server",
             "/.well-known/openid-configuration",
-            "/.well-known/oauth-protected-resource"
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp"
           ] do
         conn = call_router(conn(:get, path))
         assert conn.status == 200, "expected 200 for #{path}, got #{conn.status}"

@@ -97,7 +97,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
          :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
          {:ok, scope} <- require_scope(params),
          :ok <- check_scopes(server, scope),
-         {:ok, resource} <- resolve_resource(server, params, secret_context) do
+         {:ok, resource} <- resolve_resource(server, params, scope, secret_context) do
       {:ok,
        %{
          client: client,
@@ -377,25 +377,89 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
       else: "requested scope is not allowed"
   end
 
-  # `resource` is optional per RFC 8707 §2 — when absent, default to the
-  # server's configured resource_url. When present, it MUST match.
-  # We echo the *expected* URL (server-controlled) in the error description
-  # rather than the user-supplied value, so the message is useful without
-  # creating a "reflect user input" surface.
-  defp resolve_resource(server, %{"resource" => res}, secret_context)
-       when is_binary(res) and res != "" do
-    expected = server.resource_url(secret_context)
+  # `resource` is optional per RFC 8707 §2. When present, it MUST name a
+  # configured resource. When absent, the requested scopes select the
+  # resource (RFC 9068 §3). Error descriptions echo the configured
+  # identifiers (server-controlled), never the user-supplied value, so they
+  # don't create a "reflect user input" surface.
+  defp resolve_resource(server, params, scope, secret_context) do
+    requested = scope |> String.split(" ", trim: true) |> MapSet.new()
+    check_disjoint_scopes!(server)
 
-    if Oauth2Server.__normalize_url__(res) == expected,
-      do: {:ok, expected},
-      else:
-        {:error, "invalid_target",
-         "resource parameter does not match this authorization server " <>
-           "(expected: #{expected})"}
+    with {:ok, name} <- select_resource(server, params, requested, secret_context),
+         :ok <- check_resource_scopes(server, name, requested) do
+      {:ok, server.resource_url(name, secret_context)}
+    end
   end
 
-  defp resolve_resource(server, _, secret_context),
-    do: {:ok, server.resource_url(secret_context)}
+  defp select_resource(server, %{"resource" => res}, _requested, secret_context)
+       when is_binary(res) and res != "" do
+    case Oauth2Server.__find_resource__(server, res, secret_context) do
+      {:ok, name, _url} ->
+        {:ok, name}
+
+      :error ->
+        expected =
+          Enum.map_join(server.resources(), ", ", &server.resource_url(&1, secret_context))
+
+        {:error, "invalid_target",
+         "resource parameter does not match a resource of this authorization server " <>
+           "(expected one of: #{expected})"}
+    end
+  end
+
+  defp select_resource(server, _params, requested, _secret_context) do
+    case server.resources() do
+      [name] ->
+        {:ok, name}
+
+      names ->
+        names
+        |> Enum.filter(&MapSet.subset?(requested, MapSet.new(server.resource_scopes(&1))))
+        |> case do
+          [name] ->
+            {:ok, name}
+
+          _ ->
+            {:error, "invalid_target",
+             "resource parameter is required, because the requested scopes do not " <>
+               "select exactly one resource"}
+        end
+    end
+  end
+
+  # Static scope lists are checked at compile time. This catches scope
+  # lists that functions compute.
+  defp check_disjoint_scopes!(server) do
+    case server.resources() do
+      [_single] ->
+        :ok
+
+      names ->
+        Oauth2Server.__check_disjoint_scopes__!(
+          server,
+          Enum.map(names, &{&1, server.resource_scopes(&1)})
+        )
+    end
+  end
+
+  # RFC 8707 §2 — `invalid_target` also reports a scope that the selected
+  # resource does not accept.
+  defp check_resource_scopes(server, name, requested) do
+    if server.enforce_scopes?() do
+      allowed = MapSet.new(server.resource_scopes(name))
+
+      case requested |> MapSet.difference(allowed) |> MapSet.to_list() do
+        [] ->
+          :ok
+
+        [unknown | _] ->
+          {:error, "invalid_target", scope_error_description(unknown) <> " for this resource"}
+      end
+    else
+      :ok
+    end
+  end
 
   defp secret_context(nil), do: %{}
   defp secret_context(tenant), do: %{tenant: tenant}
