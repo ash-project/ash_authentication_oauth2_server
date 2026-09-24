@@ -34,7 +34,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
           redirect_uri: String.t(),
           code_challenge: String.t(),
           scope: String.t(),
-          state: String.t(),
+          state: String.t() | nil,
           resource: String.t()
         }
 
@@ -61,11 +61,11 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
   ## A note on the `state` parameter
 
-  Clients MUST set `state` to a cryptographically random, unguessable
-  value (RFC 6749 §10.12 / RFC 9700 §4.7). The server echoes it back via
-  the redirect so the client can correlate the response with its
-  pending request — and verify the response didn't come from a CSRF or
-  injection attack.
+  `state` is optional (OAuth 2.1 §4.1.1). This server requires PKCE, which
+  already protects the flow against CSRF (RFC 9700 §4.7). A client that
+  sends `state` MUST set it to a cryptographically random, unguessable
+  value. The server echoes it back via the redirect so the client can
+  correlate the response with its pending request.
 
   This means **clients should NOT use `state` as a stash for
   application-level data** like a "return-to" URL or routing hints. That
@@ -94,7 +94,6 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
          {:ok, redirect_uri} <- require_present(params, "redirect_uri"),
          {:ok, _response_type} <- require_present(params, "response_type"),
          {:ok, code_challenge} <- require_present(params, "code_challenge"),
-         {:ok, state} <- require_present(params, "state"),
          :ok <- check_string_params(params, ["resource", "scope", "state"]),
          :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
          :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
@@ -107,7 +106,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
          redirect_uri: redirect_uri,
          code_challenge: code_challenge,
          scope: scope,
-         state: state,
+         state: optional(params, "state"),
          resource: resource
        }}
     end
@@ -210,6 +209,15 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     case Enum.find(keys, &(not (is_nil(params[&1]) or is_binary(params[&1])))) do
       nil -> :ok
       key -> {:error, "invalid_request", "#{key} must be a string"}
+    end
+  end
+
+  # OAuth 2.1 §3.1: a parameter sent without a value counts as omitted.
+  defp optional(params, key) do
+    case Map.get(params, key) do
+      "" -> nil
+      value when is_binary(value) -> value
+      _ -> nil
     end
   end
 
