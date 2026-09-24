@@ -361,11 +361,20 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
       case MapSet.difference(requested, allowed) |> MapSet.to_list() do
         [] -> :ok
-        [unknown | _] -> {:error, "invalid_scope", "scope #{inspect(unknown)} not allowed"}
+        [unknown | _] -> {:error, "invalid_scope", scope_error_description(unknown)}
       end
     else
       :ok
     end
+  end
+
+  # OAuth 2.1 §4.1.2.1 limits `error_description` to %x20-21 / %x23-5B /
+  # %x5D-7E. A valid scope token (RFC 6749 §3.3) uses only those characters,
+  # so it is safe to echo. Any other value is left out.
+  defp scope_error_description(scope) do
+    if scope =~ ~r/\A[\x21\x23-\x5B\x5D-\x7E]+\z/,
+      do: "scope #{scope} is not allowed",
+      else: "requested scope is not allowed"
   end
 
   # `resource` is optional per RFC 8707 §2 — when absent, default to the

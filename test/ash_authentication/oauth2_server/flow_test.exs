@@ -252,6 +252,19 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert :error = Authorize.error_redirect_uri(Server, malformed)
     end
 
+    test "error_description stays inside the allowed character set (OAuth 2.1 §4.1.2.1)" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+      params = authorize_params(client, challenge, "https://chat.example.com/cb")
+
+      for scope <- ["unknown.scope", ~s|bad"scope|, "bad\\scope", "bäd"] do
+        assert {:error, "invalid_scope", desc} =
+                 Authorize.validate_request(Server, %{params | "scope" => scope})
+
+        assert desc =~ ~r/\A[\x20-\x21\x23-\x5B\x5D-\x7E]*\z/
+      end
+    end
+
     test "a missing scope is invalid_scope (OAuth 2.1 §1.4.1)" do
       {client, _} = register_client()
       {_, challenge} = pkce_pair()
