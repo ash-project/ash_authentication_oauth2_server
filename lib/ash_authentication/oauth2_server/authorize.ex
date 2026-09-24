@@ -94,11 +94,11 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
          {:ok, redirect_uri} <- require_present(params, "redirect_uri"),
          {:ok, _response_type} <- require_present(params, "response_type"),
          {:ok, code_challenge} <- require_present(params, "code_challenge"),
-         {:ok, scope} <- require_present(params, "scope"),
          {:ok, state} <- require_present(params, "state"),
          :ok <- check_string_params(params, ["resource", "scope", "state"]),
          :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
          :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
+         {:ok, scope} <- require_scope(params),
          :ok <- check_scopes(server, scope),
          {:ok, resource} <- resolve_resource(server, params, secret_context) do
       {:ok,
@@ -210,6 +210,15 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     case Enum.find(keys, &(not (is_nil(params[&1]) or is_binary(params[&1])))) do
       nil -> :ok
       key -> {:error, "invalid_request", "#{key} must be a string"}
+    end
+  end
+
+  # OAuth 2.1 §1.4.1: without a default scope, a request that omits
+  # `scope` fails as `invalid_scope`.
+  defp require_scope(params) do
+    case require_present(params, "scope") do
+      {:ok, scope} -> {:ok, scope}
+      {:error, _code, _desc} -> {:error, "invalid_scope", "scope is required"}
     end
   end
 
