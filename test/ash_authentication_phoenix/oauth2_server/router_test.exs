@@ -404,6 +404,37 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert claims["sub"] == user.id
     end
 
+    test "an unacceptable resource returns 400 + invalid_target (RFC 8707 §2)", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {verifier, challenge} = pkce()
+
+      consent_request = obtain_consent_request(user, client_id, redirect_uri, challenge)
+
+      authorize_conn =
+        conn(:post, "/", %{"consent_request" => consent_request, "action" => "approve"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      [location] = get_resp_header(authorize_conn, "location")
+      query = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+      token_conn =
+        conn(:post, "/token", %{
+          "grant_type" => "authorization_code",
+          "code" => query["code"],
+          "redirect_uri" => redirect_uri,
+          "code_verifier" => verifier,
+          "client_id" => client_id,
+          "resource" => "https://other.example.com/api"
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_protocol()
+
+      assert token_conn.status == 400
+      assert Jason.decode!(token_conn.resp_body)["error"] == "invalid_target"
+    end
+
     test "unsupported grant_type returns 400 + RFC code" do
       conn =
         conn(:post, "/token", %{"grant_type" => "password"})

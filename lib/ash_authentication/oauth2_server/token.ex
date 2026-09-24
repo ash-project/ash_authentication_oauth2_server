@@ -156,7 +156,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp verify_pkce(_, _), do: {:error, :pkce}
 
-  # `resource` is optional per RFC 8707 §2; if present it must match.
+  # `resource` is optional per RFC 8707 §2. A code bound to another
+  # resource is a bad grant. An unacceptable requested value is
+  # `invalid_target`, which RFC 8707 §2 defines for this case.
   defp check_resource_match(server, params, code, secret_context) do
     expected = server.resource_url(secret_context)
 
@@ -167,7 +169,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
       is_binary(params["resource"]) and params["resource"] != "" ->
         if AshAuthentication.Oauth2Server.__normalize_url__(params["resource"]) == expected,
           do: :ok,
-          else: {:error, :resource_mismatch}
+          else: {:error, :invalid_target}
 
       true ->
         :ok
@@ -351,7 +353,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
     cond do
       row.client_id != client_id -> :client_mismatch
       row.resource_uri != expected_resource -> :resource_mismatch
-      not requested_resource_ok?(resource, expected_resource) -> :resource_mismatch
+      not requested_resource_ok?(resource, expected_resource) -> :invalid_target
       row.revoked_at -> :revoked
       row.rotated_to_id -> :reuse
       DateTime.compare(DateTime.utc_now(), row.expires_at) == :gt -> :expired
