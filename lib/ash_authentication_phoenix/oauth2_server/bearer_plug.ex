@@ -133,6 +133,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
       :no_token ->
         conn
 
+      :malformed when required? ->
+        challenge(conn, server, :malformed, scope)
+
+      :malformed ->
+        conn
+
       {:ok, token} ->
         case verify_and_load(server, token) do
           {:ok, user, claims} ->
@@ -160,10 +166,23 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   defp maybe_set_tenant(conn, _), do: conn
 
-  defp extract_token(conn) do
-    case get_req_header(conn, "authorization") do
-      ["Bearer " <> token | _] when token != "" -> {:ok, token}
-      ["bearer " <> token | _] when token != "" -> {:ok, token}
+  defp extract_token(conn), do: __parse_bearer__(conn)
+
+  @doc false
+  # RFC 7235 §2.1: the auth-scheme is case-insensitive. RFC 6750 §2.1: one
+  # or more spaces separate it from the token. A Bearer header without a
+  # token is a malformed request (RFC 6750 §3.1). Another scheme is no
+  # Bearer authentication at all.
+  @spec __parse_bearer__(Plug.Conn.t()) :: {:ok, String.t()} | :no_token | :malformed
+  def __parse_bearer__(conn) do
+    with [header | _] <- get_req_header(conn, "authorization"),
+         [scheme | rest] <- String.split(header, " ", parts: 2),
+         "bearer" <- String.downcase(scheme) do
+      case rest |> List.first("") |> String.trim_leading(" ") do
+        "" -> :malformed
+        token -> {:ok, token}
+      end
+    else
       _ -> :no_token
     end
   end
@@ -194,6 +213,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   defp maybe_put_tenant_opt(opts, _), do: opts
 
   defp challenge(conn, server, reason, scope) do
+    status = if reason == :malformed, do: 400, else: 401
     metadata_url = Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn))
     {error, error_description} = error_params(reason)
 
@@ -207,13 +227,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
     conn
     |> put_resp_header("www-authenticate", challenge)
-    |> send_resp(401, "")
+    |> send_resp(status, "")
     |> halt()
   end
 
   defp error_params(reason) do
     case reason do
       nil -> {nil, nil}
+      :malformed -> {"invalid_request", "Bearer credentials without a token"}
       :invalid_audience -> {"invalid_token", "audience mismatch"}
       :invalid_issuer -> {"invalid_token", "issuer mismatch"}
       :expired -> {"invalid_token", "token expired"}
