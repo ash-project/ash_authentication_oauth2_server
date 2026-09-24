@@ -498,6 +498,30 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
                  "resource" => Server.resource_url()
                })
     end
+
+    test "rejects an unacceptable resource at token time with :invalid_target (RFC 8707 §2)",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      assert {:error, :invalid_target} =
+               Token.exchange_authorization_code(Server, %{
+                 "grant_type" => "authorization_code",
+                 "code" => code.id,
+                 "redirect_uri" => "https://chat.example.com/cb",
+                 "code_verifier" => verifier,
+                 "client_id" => client.id,
+                 "resource" => "https://other.example.com/api"
+               })
+    end
   end
 
   describe "refresh_token grant" do
@@ -614,6 +638,48 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
 
       assert length(rows_after) == 4
       assert Enum.all?(rows_after, &(not is_nil(&1.revoked_at)))
+    end
+
+    test "rejects an unacceptable resource with :invalid_target and keeps the grant usable",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      {:ok, first} =
+        Token.exchange_authorization_code(Server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "redirect_uri" => "https://chat.example.com/cb",
+          "code_verifier" => verifier,
+          "client_id" => client.id,
+          "resource" => Server.resource_url()
+        })
+
+      refresh_params = %{
+        "grant_type" => "refresh_token",
+        "refresh_token" => first.refresh_token,
+        "client_id" => client.id
+      }
+
+      assert {:error, :invalid_target} =
+               Token.exchange_refresh_token(
+                 Server,
+                 Map.put(refresh_params, "resource", "https://other.example.com/api")
+               )
+
+      assert {:ok, _} =
+               Token.exchange_refresh_token(
+                 Server,
+                 Map.put(refresh_params, "resource", Server.resource_url())
+               )
     end
   end
 end
