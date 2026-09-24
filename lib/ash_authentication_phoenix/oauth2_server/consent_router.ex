@@ -148,13 +148,15 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     location =
       validated.redirect_uri <>
         "?" <>
-        URI.encode_query(%{
-          "code" => code.id,
-          "state" => validated.state,
-          # RFC 9207 — identify the issuer in the authorization response
-          # so the client can detect authorization-server mix-up attacks.
-          "iss" => issuer(conn, server)
-        })
+        URI.encode_query(
+          %{
+            "code" => code.id,
+            # RFC 9207 — identify the issuer in the authorization response
+            # so the client can detect authorization-server mix-up attacks.
+            "iss" => issuer(conn, server)
+          }
+          |> maybe_put_param("state", validated.state)
+        )
 
     conn
     |> put_resp_header("location", location)

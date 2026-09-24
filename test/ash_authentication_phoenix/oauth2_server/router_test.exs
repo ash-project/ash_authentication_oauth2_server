@@ -334,6 +334,29 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert get_resp_header(conn, "location") == []
     end
 
+    test "accepts a request without state and omits state from the redirect (OAuth 2.1 §4.1.1)",
+         %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_v, challenge} = pkce()
+
+      OAuthConsent
+      |> Ash.Changeset.for_create(:grant, %{user_id: user.id, client_id: client_id, scope: "mcp"})
+      |> Ash.create!()
+
+      query = client_id |> authorize_query(redirect_uri, challenge) |> Map.delete("state")
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(query))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      params = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert is_binary(params["code"])
+      refute Map.has_key?(params, "state")
+    end
+
     test "never redirects an unknown client", %{user: user} do
       {_v, challenge} = pkce()
 
