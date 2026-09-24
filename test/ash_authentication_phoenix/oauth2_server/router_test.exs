@@ -300,6 +300,57 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
     end
   end
 
+  describe "ConsentRouter: authorize errors" do
+    test "redirects an error only to the exact registered redirect_uri", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_v, challenge} = pkce()
+
+      query =
+        client_id
+        |> authorize_query(redirect_uri, challenge)
+        |> Map.put("response_type", "token")
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(query))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri <> "?")
+      params = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert params["error"] == "unsupported_response_type"
+
+      # Equivalent after normalization, but not the registered string.
+      conn =
+        conn(
+          :get,
+          "/?" <> URI.encode_query(%{query | "redirect_uri" => "HTTPS://CHAT.EXAMPLE.COM/cb"})
+        )
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 400
+      assert get_resp_header(conn, "location") == []
+    end
+
+    test "never redirects an unknown client", %{user: user} do
+      {_v, challenge} = pkce()
+
+      query =
+        authorize_query(Ash.UUIDv7.generate(), "https://chat.example.com/cb", challenge)
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(query))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 400
+      assert get_resp_header(conn, "location") == []
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+    end
+  end
+
   describe "ConsentRouter: POST /authorize" do
     test "approves and 302s with code, recording consent", %{user: user} do
       {client_id, redirect_uri} = create_client_for_authorize()

@@ -178,7 +178,57 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       params =
         authorize_params(%{id: Ash.UUIDv7.generate()}, challenge, "https://chat.example.com/cb")
 
-      assert {:error, "invalid_client", _} = Authorize.validate_request(Server, params)
+      assert {:error, :bad_client, "invalid_client", _} =
+               Authorize.validate_request(Server, params)
+    end
+
+    test "validates the client and redirect_uri before any other error (OAuth 2.1 §4.1.2.1)" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+
+      unknown_client =
+        %{id: Ash.UUIDv7.generate()}
+        |> authorize_params(challenge, "https://chat.example.com/cb")
+        |> Map.put("response_type", "token")
+
+      assert {:error, :bad_client, "invalid_client", _} =
+               Authorize.validate_request(Server, unknown_client)
+
+      bad_redirect =
+        client
+        |> authorize_params(challenge, "https://attacker.example.com/cb")
+        |> Map.put("response_type", "token")
+
+      assert {:error, :bad_redirect_uri} = Authorize.validate_request(Server, bad_redirect)
+    end
+
+    test "a parameter that is not a string is invalid_request, not omitted" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+      params = authorize_params(client, challenge, "https://chat.example.com/cb")
+
+      for key <- ["resource", "scope", "state"] do
+        assert {:error, "invalid_request", _} =
+                 Authorize.validate_request(Server, Map.put(params, key, %{"x" => "y"}))
+      end
+    end
+
+    test "reports a malformed request before an unsupported value" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+
+      params =
+        client
+        |> authorize_params(challenge, "https://chat.example.com/cb")
+        |> Map.merge(%{"response_type" => "token", "resource" => "https://other.example.com"})
+
+      assert {:error, "unsupported_response_type", _} = Authorize.validate_request(Server, params)
+
+      assert {:error, "invalid_request", _} =
+               Authorize.validate_request(Server, Map.delete(params, "code_challenge"))
+
+      assert {:error, "invalid_request", _} =
+               Authorize.validate_request(Server, Map.delete(params, "response_type"))
     end
 
     test "rejects mismatched redirect_uri without leaking via redirect" do

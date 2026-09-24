@@ -48,11 +48,16 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
     * `{:ok, validated}` — request is structurally sound and the client +
       redirect_uri are known.
+    * `{:error, :bad_client, error_code, description}` — `client_id` is
+      missing or unknown. Per OAuth 2.1 §4.1.2.1 the controller MUST NOT
+      redirect.
     * `{:error, :bad_redirect_uri}` — redirect_uri is missing or doesn't
       match a registered URI; per RFC 6749 §4.1.2.1 the controller MUST NOT
       redirect.
     * `{:error, error_code, description}` — any other validation error.
-      Controllers redirect these errors back to `redirect_uri`.
+      The client and the redirect_uri in `params` are validated before any
+      of these, so controllers redirect these errors back to that
+      `redirect_uri`.
 
   ## A note on the `state` parameter
 
@@ -75,21 +80,27 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   """
   @spec validate_request(server :: module(), params :: map(), opts()) ::
           {:ok, validated()}
+          | {:error, :bad_client, String.t(), String.t()}
           | {:error, :bad_redirect_uri}
           | {:error, String.t(), String.t()}
   def validate_request(server, params, opts \\ []) do
     secret_context = secret_context(Keyword.get(opts, :tenant))
 
-    with :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
-         {:ok, client} <- load_client(server, params, opts),
+    # OAuth 2.1 §4.1.2.1: client and redirect URI first, because only
+    # errors after them may be redirected. Then malformed-request errors,
+    # then the values the server does not accept.
+    with {:ok, client} <- load_client(server, params, opts),
          :ok <- check_redirect_uri(params, client),
-         :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
-         {:ok, resource} <- resolve_resource(server, params, secret_context),
+         {:ok, redirect_uri} <- require_present(params, "redirect_uri"),
+         {:ok, _response_type} <- require_present(params, "response_type"),
          {:ok, code_challenge} <- require_present(params, "code_challenge"),
          {:ok, scope} <- require_present(params, "scope"),
+         {:ok, state} <- require_present(params, "state"),
+         :ok <- check_string_params(params, ["resource", "scope", "state"]),
+         :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
+         :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
          :ok <- check_scopes(server, scope),
-         {:ok, redirect_uri} <- require_present(params, "redirect_uri"),
-         {:ok, state} <- require_present(params, "state") do
+         {:ok, resource} <- resolve_resource(server, params, secret_context) do
       {:ok,
        %{
          client: client,
@@ -193,6 +204,15 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     end
   end
 
+  # A query like `resource[x]=y` decodes to a map. That is a malformed
+  # parameter, `invalid_request`, not an omitted one (OAuth 2.1 §4.1.2.1).
+  defp check_string_params(params, keys) do
+    case Enum.find(keys, &(not (is_nil(params[&1]) or is_binary(params[&1])))) do
+      nil -> :ok
+      key -> {:error, "invalid_request", "#{key} must be a string"}
+    end
+  end
+
   defp require_present(params, key) do
     case Map.get(params, key) do
       v when is_binary(v) and v != "" -> {:ok, v}
@@ -206,22 +226,29 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     if server.cimd_enabled?() do
       case CIMD.resolve_client(server, url, opts) do
         {:ok, client} -> {:ok, client}
-        {:error, description} -> {:error, "invalid_client", description}
+        {:error, description} -> {:error, :bad_client, "invalid_client", description}
       end
     else
-      {:error, "invalid_client", "URL client_ids are not supported by this server"}
+      {:error, :bad_client, "invalid_client", "URL client_ids are not supported by this server"}
     end
   end
 
-  defp load_client(server, %{"client_id" => id}, opts) do
+  defp load_client(server, %{"client_id" => id}, opts) when is_binary(id) and id != "" do
     case Ash.get(server.client_resource(), id, ash_opts(opts)) do
       {:ok, client} -> {:ok, client}
-      _ -> {:error, "invalid_client", "unknown client_id"}
+      _ -> {:error, :bad_client, "invalid_client", "unknown client_id"}
     end
   end
 
-  defp load_client(_server, _params, _opts),
-    do: {:error, "invalid_request", "client_id required"}
+  defp load_client(_server, params, _opts) do
+    case Map.fetch(params, "client_id") do
+      {:ok, id} when id not in [nil, ""] ->
+        {:error, :bad_client, "invalid_request", "client_id must be a string"}
+
+      _ ->
+        {:error, :bad_client, "invalid_request", "client_id required"}
+    end
+  end
 
   # RFC 9700 §4.1 — exact byte-equal match. No normalization, no
   # default-port elision, no trailing-slash equivalence. The client MUST
