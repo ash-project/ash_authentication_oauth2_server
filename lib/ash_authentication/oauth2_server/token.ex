@@ -58,7 +58,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
     tenant = Keyword.get(opts, :tenant)
     secret_context = secret_context(tenant)
 
-    with {:ok, presented_client_id, canonical_client_id} <-
+    with :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
+         {:ok, presented_client_id, canonical_client_id} <-
            resolve_client_id(server, params, opts),
          {:ok, code, client} <- consume_code(server, params, canonical_client_id, opts),
          :ok <- verify_pkce(code, params),
@@ -89,6 +90,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp secret_context(nil), do: %{}
   defp secret_context(tenant), do: %{tenant: tenant}
+
+  # OAuth 2.1 §3.2: a parameter sent without a value counts as omitted. A
+  # missing required parameter is `invalid_request` (§3.2.4), checked before
+  # the client or the grant is looked up.
+  defp require_params(params, keys) do
+    if Enum.all?(keys, &present?(params[&1])), do: :ok, else: {:error, :invalid_request}
+  end
+
+  defp present?(value), do: is_binary(value) and value != ""
 
   # Map the presented `client_id` param to the id stored on codes /
   # refresh rows. Ordinary client_ids pass through unchanged; URL-shaped
@@ -203,18 +213,13 @@ defmodule AshAuthentication.Oauth2Server.Token do
           {:ok, token_response()} | {:error, atom()}
   def exchange_refresh_token(server, params, opts \\ [])
 
-  def exchange_refresh_token(
-        server,
-        %{"refresh_token" => raw, "client_id" => _} = params,
-        opts
-      )
-      when is_binary(raw) do
-    with {:ok, presented_client_id, client_id} <- resolve_client_id(server, params, opts) do
+  def exchange_refresh_token(server, params, opts) do
+    with :ok <- require_params(params, ["client_id", "refresh_token"]),
+         {:ok, presented_client_id, client_id} <- resolve_client_id(server, params, opts) do
+      raw = params["refresh_token"]
       do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts)
     end
   end
-
-  def exchange_refresh_token(_, _, _), do: {:error, :invalid_request}
 
   defp do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts) do
     hash = hash_refresh(raw)
