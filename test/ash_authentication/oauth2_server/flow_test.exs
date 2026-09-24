@@ -213,6 +213,45 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       end
     end
 
+    test "redirect_uri defaults to the only registered one (OAuth 2.1 §2.3.2)" do
+      {client, _} = register_client("https://chat.example.com/cb")
+      {_, challenge} = pkce_pair()
+
+      params =
+        client
+        |> authorize_params(challenge, "https://chat.example.com/cb")
+        |> Map.delete("redirect_uri")
+
+      assert {:ok, %{redirect_uri: "https://chat.example.com/cb"}} =
+               Authorize.validate_request(Server, params)
+
+      {:ok, two_uris, _} =
+        Register.register(Server, %{
+          "client_name" => "Two",
+          "redirect_uris" => ["https://chat.example.com/cb", "https://chat.example.com/other"]
+        })
+
+      assert {:error, :bad_redirect_uri} =
+               Authorize.validate_request(Server, %{params | "client_id" => two_uris.id})
+
+      assert {:ok, "https://chat.example.com/cb"} = Authorize.error_redirect_uri(Server, params)
+
+      assert :error =
+               Authorize.error_redirect_uri(Server, %{params | "client_id" => two_uris.id})
+
+      assert :error =
+               Authorize.error_redirect_uri(
+                 Server,
+                 Map.put(params, "redirect_uri", "https://attacker.example.com/cb")
+               )
+
+      assert :error = Authorize.error_redirect_uri(Server, Map.delete(params, "client_id"))
+
+      malformed = Map.put(params, "redirect_uri", %{"x" => "y"})
+      assert {:error, :bad_redirect_uri} = Authorize.validate_request(Server, malformed)
+      assert :error = Authorize.error_redirect_uri(Server, malformed)
+    end
+
     test "a missing scope is invalid_scope (OAuth 2.1 §1.4.1)" do
       {client, _} = register_client()
       {_, challenge} = pkce_pair()

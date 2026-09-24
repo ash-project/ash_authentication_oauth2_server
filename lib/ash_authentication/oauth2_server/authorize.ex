@@ -55,9 +55,8 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
       match a registered URI; per RFC 6749 §4.1.2.1 the controller MUST NOT
       redirect.
     * `{:error, error_code, description}` — any other validation error.
-      The client and the redirect_uri in `params` are validated before any
-      of these, so controllers redirect these errors back to that
-      `redirect_uri`.
+      The client and the redirect URI are validated before any of these,
+      so controllers redirect these errors to `error_redirect_uri/3`.
 
   ## A note on the `state` parameter
 
@@ -90,8 +89,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     # errors after them may be redirected. Then malformed-request errors,
     # then the values the server does not accept.
     with {:ok, client} <- load_client(server, params, opts),
-         :ok <- check_redirect_uri(params, client),
-         {:ok, redirect_uri} <- require_present(params, "redirect_uri"),
+         {:ok, redirect_uri} <- resolve_redirect_uri(params, client),
          {:ok, _response_type} <- require_present(params, "response_type"),
          {:ok, code_challenge} <- require_present(params, "code_challenge"),
          :ok <- check_string_params(params, ["resource", "scope", "state"]),
@@ -111,6 +109,34 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
        }}
     end
   end
+
+  @doc """
+  The redirect URI for an error that `validate_request/3` returned as
+  `{:error, error_code, description}`: the request's `redirect_uri`, or the
+  client's only registered redirect URI when the request omits it.
+
+  Applies the same match as `validate_request/3`, so it returns `:error`
+  for any URI that `validate_request/3` would not redirect to. Reads the
+  client from the database only. It never fetches a Client ID Metadata
+  Document, because `validate_request/3` already stored it.
+  """
+  @spec error_redirect_uri(server :: module(), params :: map(), opts()) ::
+          {:ok, String.t()} | :error
+  def error_redirect_uri(server, params, opts \\ []) do
+    with {:ok, client} <- find_client(server, params["client_id"], opts),
+         {:ok, redirect_uri} <- resolve_redirect_uri(params, client) do
+      {:ok, redirect_uri}
+    else
+      _ -> :error
+    end
+  end
+
+  defp find_client(server, "https://" <> _ = url, opts), do: CIMD.find_client(server, url, opts)
+
+  defp find_client(server, client_id, opts) when is_binary(client_id) and client_id != "",
+    do: Ash.get(server.client_resource(), client_id, ash_opts(opts))
+
+  defp find_client(_server, _client_id, _opts), do: :error
 
   @doc """
   Has the user already consented to this client at a scope that covers the
@@ -285,16 +311,29 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   # them entirely. We include `localhost` here too, accepting the same
   # theoretical, local-machine-only risk the IP-literal exception
   # already accepts.
-  defp check_redirect_uri(%{"redirect_uri" => uri}, %{redirect_uris: uris})
-       when is_binary(uri) and is_list(uris) do
-    if Enum.any?(uris, &redirect_uri_match?(uri, &1)) do
-      :ok
-    else
-      {:error, :bad_redirect_uri}
+  # OAuth 2.1 §2.3.2: `redirect_uri` is optional when the client has
+  # exactly one registered redirect URI.
+  # A `redirect_uri` that is not a string is malformed, not omitted.
+  defp resolve_redirect_uri(%{"redirect_uri" => uri}, _client)
+       when not is_nil(uri) and not is_binary(uri),
+       do: {:error, :bad_redirect_uri}
+
+  defp resolve_redirect_uri(params, %{redirect_uris: uris}) when is_list(uris) do
+    case {optional(params, "redirect_uri"), uris} do
+      {nil, [only]} ->
+        {:ok, only}
+
+      {nil, _} ->
+        {:error, :bad_redirect_uri}
+
+      {uri, uris} ->
+        if Enum.any?(uris, &redirect_uri_match?(uri, &1)),
+          do: {:ok, uri},
+          else: {:error, :bad_redirect_uri}
     end
   end
 
-  defp check_redirect_uri(_, _), do: {:error, :bad_redirect_uri}
+  defp resolve_redirect_uri(_, _), do: {:error, :bad_redirect_uri}
 
   @loopback_hosts ["127.0.0.1", "::1", "localhost"]
 
