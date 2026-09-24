@@ -146,17 +146,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     code = Authorize.issue_code!(server, user, validated, tenant_opts(conn))
 
     location =
-      validated.redirect_uri <>
-        "?" <>
-        URI.encode_query(
-          %{
-            "code" => code.id,
-            # RFC 9207 — identify the issuer in the authorization response
-            # so the client can detect authorization-server mix-up attacks.
-            "iss" => issuer(conn, server)
-          }
-          |> maybe_put_param("state", validated.state)
-        )
+      append_query(
+        validated.redirect_uri,
+        %{
+          "code" => code.id,
+          # RFC 9207 — identify the issuer in the authorization response
+          # so the client can detect authorization-server mix-up attacks.
+          "iss" => issuer(conn, server)
+        }
+        |> maybe_put_param("state", validated.state)
+      )
 
     conn
     |> put_resp_header("location", location)
@@ -195,9 +194,24 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
       |> maybe_put_param("state", state)
 
     conn
-    |> put_resp_header("location", redirect_uri <> "?" <> URI.encode_query(query))
+    |> put_resp_header("location", append_query(redirect_uri, query))
     |> send_resp(302, "")
     |> halt()
+  end
+
+  # OAuth 2.1 §2.3: a query in the redirect URI MUST be retained when
+  # adding parameters. The URI is extended as a string, because re-encoding
+  # it with URI.to_string/1 can change the registered form (a default port,
+  # for example). Registered redirect URIs carry no fragment.
+  defp append_query(redirect_uri, params) do
+    separator =
+      case URI.parse(redirect_uri).query do
+        nil -> "?"
+        "" -> ""
+        _query -> "&"
+      end
+
+    redirect_uri <> separator <> URI.encode_query(params)
   end
 
   defp issuer(conn, server) do
