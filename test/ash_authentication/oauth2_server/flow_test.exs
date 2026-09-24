@@ -575,6 +575,23 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
                  "client_id" => client.id
                })
     end
+
+    test "an unknown client is invalid_client (OAuth 2.1 §3.2.4)" do
+      assert {:error, :invalid_client} =
+               Token.exchange_authorization_code(Server, %{
+                 "grant_type" => "authorization_code",
+                 "code" => "code",
+                 "code_verifier" => "verifier",
+                 "client_id" => "unknown-client"
+               })
+
+      assert {:error, :invalid_client} =
+               Token.exchange_refresh_token(Server, %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => "token",
+                 "client_id" => "unknown-client"
+               })
+    end
   end
 
   describe "refresh_token grant" do
