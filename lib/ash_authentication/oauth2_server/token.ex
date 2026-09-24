@@ -104,19 +104,23 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # refresh rows. Ordinary client_ids pass through unchanged; URL-shaped
   # ones (Client ID Metadata Documents) resolve to the client row that was
   # upserted at authorize time — a database lookup only, never a fetch.
-  # Returns `{:ok, presented, canonical}`.
+  # An unknown client is `invalid_client` (OAuth 2.1 §3.2.4), checked
+  # before the grant. Returns `{:ok, presented, canonical}`.
   defp resolve_client_id(server, %{"client_id" => "https://" <> _ = url}, opts) do
     with true <- server.cimd_enabled?(),
          {:ok, client} <- CIMD.find_client(server, url, opts) do
       {:ok, url, client.id}
     else
-      _ -> {:error, :client_mismatch}
+      _ -> {:error, :invalid_client}
     end
   end
 
-  defp resolve_client_id(_server, %{"client_id" => client_id}, _opts)
+  defp resolve_client_id(server, %{"client_id" => client_id}, opts)
        when is_binary(client_id) and client_id != "" do
-    {:ok, client_id, client_id}
+    case Ash.get(server.client_resource(), client_id, ash_opts(opts)) do
+      {:ok, _client} -> {:ok, client_id, client_id}
+      _ -> {:error, :invalid_client}
+    end
   end
 
   defp resolve_client_id(_server, _params, _opts), do: {:error, :invalid_request}

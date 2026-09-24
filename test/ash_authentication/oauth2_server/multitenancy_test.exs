@@ -156,8 +156,9 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
 
       code = Authorize.issue_code!(TenantedServer, user_a, validated, tenant: @tenant_a)
 
-      # Try to redeem under the wrong tenant — should be unreachable.
-      assert {:error, :invalid_code} =
+      # Try to redeem under the wrong tenant — the client itself is not
+      # visible there, so the request fails before the code is read.
+      assert {:error, :invalid_client} =
                Token.exchange_authorization_code(
                  TenantedServer,
                  %{
@@ -209,8 +210,8 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
           tenant: @tenant_a
         )
 
-      # Wrong tenant on refresh → invalid_refresh (filter doesn't see the row)
-      assert {:error, :invalid_refresh} =
+      # Wrong tenant on refresh → the client is not visible there
+      assert {:error, :invalid_client} =
                Token.exchange_refresh_token(
                  TenantedServer,
                  %{
