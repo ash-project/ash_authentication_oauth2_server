@@ -41,8 +41,16 @@ defmodule AshAuthentication.Oauth2Server.Token do
           scope: String.t()
         }
 
-  @typedoc "Options shared across this module's public functions."
-  @type opts :: [tenant: any()]
+  @typedoc """
+  Options shared across this module's public functions.
+
+    * `:tenant` — the Ash tenant.
+    * `:authorization_scheme` — the scheme of the request's `Authorization`
+      header, downcased (for example `"basic"`), or `nil` without one. The
+      server supports public clients only, so any client credentials make
+      the request fail (OAuth 2.1 §3.2.2).
+  """
+  @type opts :: [tenant: any(), authorization_scheme: String.t() | nil]
 
   # ── authorization_code grant ───────────────────────────────────────────────
 
@@ -58,7 +66,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
     tenant = Keyword.get(opts, :tenant)
     secret_context = secret_context(tenant)
 
-    with :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
+    with :ok <- check_no_client_credentials(params, opts),
+         :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
          {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
          :ok <- check_grant_type(client, "authorization_code"),
          {:ok, code} <- load_code(server, params, client.id, opts),
@@ -107,6 +116,31 @@ defmodule AshAuthentication.Oauth2Server.Token do
     if is_nil(params[key]) or is_binary(params[key]),
       do: :ok,
       else: {:error, :invalid_request}
+  end
+
+  # OAuth 2.1 §3.2.2: the server MUST authenticate a client that includes
+  # client authentication. Every client here is public
+  # (`token_endpoint_auth_method: "none"`), so there is nothing to check
+  # the credentials against, and any credentials are `invalid_client`. More
+  # than one mechanism is `invalid_request` (§3.2.4). An empty
+  # `client_secret` counts as omitted (§3.2), which keeps the
+  # `dcr_always_return_client_secret?` workaround working.
+  defp check_no_client_credentials(params, opts) do
+    mechanisms =
+      Enum.count(
+        [
+          Keyword.get(opts, :authorization_scheme) == "basic",
+          present?(params["client_secret"]),
+          present?(params["client_assertion"])
+        ],
+        & &1
+      )
+
+    case mechanisms do
+      0 -> :ok
+      1 -> {:error, :unsupported_client_authentication}
+      _ -> {:error, :invalid_request}
+    end
   end
 
   # Map the presented `client_id` param to the id stored on codes /
@@ -245,7 +279,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
   def exchange_refresh_token(server, params, opts \\ [])
 
   def exchange_refresh_token(server, params, opts) do
-    with :ok <- require_params(params, ["client_id", "refresh_token"]),
+    with :ok <- check_no_client_credentials(params, opts),
+         :ok <- require_params(params, ["client_id", "refresh_token"]),
          :ok <- check_optional_string(params, "scope"),
          {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
          :ok <- check_grant_type(client, "refresh_token") do
@@ -465,7 +500,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
   """
   @spec revoke(server :: module(), params :: map(), opts()) :: :ok | {:error, atom()}
   def revoke(server, params, opts \\ []) do
-    with :ok <- require_params(params, ["client_id", "token"]),
+    with :ok <- check_no_client_credentials(params, opts),
+         :ok <- require_params(params, ["client_id", "token"]),
          {:ok, _presented, %{id: client_id}} <- resolve_client_id(server, params, opts) do
       token = params["token"]
 
