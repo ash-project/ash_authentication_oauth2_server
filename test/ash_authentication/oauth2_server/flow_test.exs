@@ -554,6 +554,27 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
                  Map.put(params, "code_verifier", verifier)
                )
     end
+
+    test "accepts a token request without redirect_uri (OAuth 2.1 §4.1.3)", %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      assert {:ok, _} =
+               Token.exchange_authorization_code(Server, %{
+                 "grant_type" => "authorization_code",
+                 "code" => code.id,
+                 "code_verifier" => verifier,
+                 "client_id" => client.id
+               })
+    end
   end
 
   describe "refresh_token grant" do

@@ -186,14 +186,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  # RFC 9700 §4.1 — exact match against the redirect URI bound to the
-  # code at issue time.
-  defp check_redirect_match(%{"redirect_uri" => uri}, %{redirect_uri: code_uri})
-       when is_binary(uri) and is_binary(code_uri) do
-    if uri == code_uri, do: :ok, else: {:error, :redirect_mismatch}
-  end
-
-  defp check_redirect_match(_, _), do: {:error, :redirect_mismatch}
+  # OAuth 2.1 §4.1.3 drops `redirect_uri` from the token request, because
+  # PKCE prevents code injection. §10.2 still requires an OAuth 2.0 client's
+  # value to match the one bound to the code, exactly (RFC 9700 §4.1).
+  defp check_redirect_match(%{"redirect_uri" => uri}, %{redirect_uri: uri}), do: :ok
+  defp check_redirect_match(%{"redirect_uri" => nil}, _), do: :ok
+  defp check_redirect_match(%{"redirect_uri" => ""}, _), do: :ok
+  defp check_redirect_match(%{"redirect_uri" => _}, _), do: {:error, :redirect_mismatch}
+  defp check_redirect_match(_, _), do: :ok
 
   # ── refresh_token grant ───────────────────────────────────────────────────
 
