@@ -762,5 +762,48 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
                  "client_id" => client.id
                })
     end
+
+    test "a replayed refresh token is detected even with a wrong resource (OAuth 2.1 §4.3.1)",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      {:ok, first} =
+        Token.exchange_authorization_code(Server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "code_verifier" => verifier,
+          "client_id" => client.id
+        })
+
+      refresh_params = fn rt, resource ->
+        %{
+          "grant_type" => "refresh_token",
+          "refresh_token" => rt,
+          "client_id" => client.id,
+          "resource" => resource
+        }
+      end
+
+      {:ok, second} =
+        Token.exchange_refresh_token(Server, refresh_params.(first.refresh_token, nil))
+
+      assert {:error, :reuse} =
+               Token.exchange_refresh_token(
+                 Server,
+                 refresh_params.(first.refresh_token, "https://other.example.com/api")
+               )
+
+      assert {:error, :revoked} =
+               Token.exchange_refresh_token(Server, refresh_params.(second.refresh_token, nil))
+    end
   end
 end

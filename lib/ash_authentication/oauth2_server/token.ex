@@ -358,14 +358,18 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
+  # The token's own state comes first. A rotated token is a replay no matter
+  # which client or resource the request names, so it must reach `:reuse`
+  # and revoke the chain (OAuth 2.1 §4.3.1). A dead token is `invalid_grant`
+  # even when the requested resource is also wrong.
   defp classify_row(row, client_id, expected_resource, resource) do
     cond do
-      row.client_id != client_id -> :client_mismatch
-      row.resource_uri != expected_resource -> :resource_mismatch
-      not requested_resource_ok?(resource, expected_resource) -> :invalid_target
       row.revoked_at -> :revoked
       row.rotated_to_id -> :reuse
       DateTime.compare(DateTime.utc_now(), row.expires_at) == :gt -> :expired
+      row.client_id != client_id -> :client_mismatch
+      row.resource_uri != expected_resource -> :resource_mismatch
+      not requested_resource_ok?(resource, expected_resource) -> :invalid_target
       true -> :invalid_refresh
     end
   end
