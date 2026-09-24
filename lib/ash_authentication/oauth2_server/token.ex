@@ -274,10 +274,11 @@ defmodule AshAuthentication.Oauth2Server.Token do
           # The bulk update itself failed for a real reason (validation,
           # constraint, DB connectivity, etc.). Log it for ops visibility,
           # don't leak details to the caller, and skip the disambiguation
-          # read — we already know the operation didn't complete.
+          # read — we already know the operation didn't complete. The
+          # refresh token may still be valid, so this is not `invalid_grant`.
           Logger.error("Oauth2Server: refresh-token bulk_update failed: " <> inspect(errors))
 
-          {:error, :invalid_refresh}
+          {:error, :server_error}
       end
     end
   end
@@ -293,7 +294,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   #     other invalid-grant cases.
   #   * `{:bulk_error, errors}` — the bulk update itself failed for a
   #     real reason (validation, constraint, etc.). The caller logs
-  #     and returns a generic invalid_refresh without disambiguating.
+  #     and returns a server error without disambiguating.
   defp atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
     if requested_resource_ok?(resource, expected_resource),
       do: do_atomic_rotate(server, hash, client_id, expected_resource, new_id, opts),

@@ -20,7 +20,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
 
   alias AshAuthentication.Oauth2Server.{Jwt, PKCE}
 
-  alias AshAuthentication.Phoenix.Oauth2Server.{ConsentRouter, ProtocolRouter}
+  alias AshAuthentication.Phoenix.Oauth2Server.{ConsentRouter, Errors, ProtocolRouter}
   alias Oauth2ServerTest.Server
 
   alias Oauth2ServerTest.{
@@ -595,6 +595,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert conn.status == 400
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "unsupported_grant_type"
+    end
+  end
+
+  describe "Errors.describe_token_error/1" do
+    test "maps a reason it does not know to a server error, not a client error" do
+      assert {500, "server_error", _} = Errors.describe_token_error(:server_error)
+      assert {500, "server_error", _} = Errors.describe_token_error(%RuntimeError{})
+      assert {400, "invalid_request", _} = Errors.describe_token_error(:invalid_request)
     end
   end
 
