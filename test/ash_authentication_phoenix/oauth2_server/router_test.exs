@@ -435,6 +435,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert Jason.decode!(token_conn.resp_body)["error"] == "invalid_target"
     end
 
+    test "a missing grant_type returns 400 + invalid_request" do
+      conn =
+        conn(:post, "/token", %{"client_id" => "x"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    end
+
     test "unsupported grant_type returns 400 + RFC code" do
       conn =
         conn(:post, "/token", %{"grant_type" => "password"})

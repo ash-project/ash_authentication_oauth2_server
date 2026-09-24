@@ -122,6 +122,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
       case Map.get(params, "grant_type") do
         "authorization_code" -> Token.exchange_authorization_code(server, params, opts)
         "refresh_token" -> Token.exchange_refresh_token(server, params, opts)
+        type when type in [nil, ""] -> {:error, :invalid_request}
         _ -> {:error, :unsupported_grant_type}
       end
 

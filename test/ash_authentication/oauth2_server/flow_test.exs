@@ -522,6 +522,38 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
                  "resource" => "https://other.example.com/api"
                })
     end
+
+    test "a missing code_verifier is invalid_request and leaves the code usable (OAuth 2.1 §3.2.4)",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      params = %{
+        "grant_type" => "authorization_code",
+        "code" => code.id,
+        "redirect_uri" => "https://chat.example.com/cb",
+        "client_id" => client.id
+      }
+
+      assert {:error, :invalid_request} = Token.exchange_authorization_code(Server, params)
+
+      assert {:error, :invalid_request} =
+               Token.exchange_authorization_code(Server, Map.put(params, "code_verifier", ""))
+
+      assert {:ok, _} =
+               Token.exchange_authorization_code(
+                 Server,
+                 Map.put(params, "code_verifier", verifier)
+               )
+    end
   end
 
   describe "refresh_token grant" do
@@ -680,6 +712,17 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
                  Server,
                  Map.put(refresh_params, "resource", Server.resource_url())
                )
+    end
+
+    test "an empty refresh_token is invalid_request (OAuth 2.1 §3.2)" do
+      {client, _} = register_client()
+
+      assert {:error, :invalid_request} =
+               Token.exchange_refresh_token(Server, %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => "",
+                 "client_id" => client.id
+               })
     end
   end
 end
