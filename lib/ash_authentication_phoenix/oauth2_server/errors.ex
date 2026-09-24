@@ -144,6 +144,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   Translate a `:reason` atom returned from a core module into an
   `{http_status, error_code, description}` triple suitable for an OAuth
   error response.
+
+  A reason that is not listed here is a server fault, not a malformed
+  request, so it maps to `500`.
   """
   @spec describe_token_error(atom()) :: {pos_integer(), String.t(), String.t()}
   def describe_token_error(reason) do
@@ -162,7 +165,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       :invalid_scope -> {400, "invalid_scope", "requested scope exceeds the grant"}
       :invalid_request -> {400, "invalid_request", "missing required parameters"}
       :refresh_create_failed -> {500, "server_error", "could not issue refresh token"}
-      _ -> {400, "invalid_request", "request could not be processed"}
+      _ -> {500, "server_error", "request could not be processed"}
     end
   end
 
