@@ -40,9 +40,13 @@ defmodule AshAuthentication.Oauth2Server.Register do
     * `{:error, :dcr_disabled}` when the server has `dcr_enabled?: false`
       (the library default). Controllers should treat this as a 404 —
       the endpoint is not exposed.
-    * `{:error, :invalid_initial_access_token}` when the bearer was
-      missing or didn't match. Per RFC 7591 §3.2.2 this is a Bearer-auth
-      failure — controllers should emit `401` with
+    * `{:error, :missing_initial_access_token}` when the server requires
+      an initial access token and the request has none. Per RFC 6750 §3.1
+      controllers should emit `401` with a `WWW-Authenticate: Bearer`
+      challenge that carries no error code.
+    * `{:error, :invalid_initial_access_token}` when the bearer didn't
+      match. Per RFC 7591 §3.2.2 this is a Bearer-auth failure —
+      controllers should emit `401` with
       `WWW-Authenticate: Bearer error="invalid_token"`, not 400.
     * `{:error, code, description}` for any other validation failure —
       a 400 DCR error response per RFC 7591 §3.2.2.
@@ -50,6 +54,7 @@ defmodule AshAuthentication.Oauth2Server.Register do
   @spec register(server :: module(), params :: map(), opts :: keyword()) ::
           {:ok, Ash.Resource.record(), map()}
           | {:error, :dcr_disabled}
+          | {:error, :missing_initial_access_token}
           | {:error, :invalid_initial_access_token}
           | {:error, String.t(), String.t()}
   def register(server, params, opts \\ []) do
@@ -64,6 +69,7 @@ defmodule AshAuthentication.Oauth2Server.Register do
       {:ok, client, response_body(server, client)}
     else
       {:error, :dcr_disabled} = err -> err
+      {:error, :missing_initial_access_token} = err -> err
       {:error, :invalid_initial_access_token} = err -> err
       {:error, code, desc} -> {:error, code, desc}
       {:error, _other} -> {:error, "invalid_client_metadata", "client could not be registered"}
@@ -80,11 +86,15 @@ defmodule AshAuthentication.Oauth2Server.Register do
         :ok
 
       expected when is_binary(expected) ->
-        presented = Keyword.get(opts, :initial_access_token)
+        case Keyword.get(opts, :initial_access_token) do
+          presented when is_binary(presented) and presented != "" ->
+            if Plug.Crypto.secure_compare(expected, presented),
+              do: :ok,
+              else: {:error, :invalid_initial_access_token}
 
-        if is_binary(presented) and Plug.Crypto.secure_compare(expected, presented),
-          do: :ok,
-          else: {:error, :invalid_initial_access_token}
+          _ ->
+            {:error, :missing_initial_access_token}
+        end
     end
   end
 

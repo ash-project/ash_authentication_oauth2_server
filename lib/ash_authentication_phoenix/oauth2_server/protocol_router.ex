@@ -28,7 +28,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   use Plug.Router, copy_opts_to_assign: :oauth2_server_router_opts
 
   alias AshAuthentication.Oauth2Server.{Metadata, Register, Token}
-  alias AshAuthentication.Phoenix.Oauth2Server.Errors
+  alias AshAuthentication.Phoenix.Oauth2Server.{BearerPlug, Errors}
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :json],
@@ -96,6 +96,15 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
         # DCR is off on this server. Treat the route as not present —
         # consistent with the metadata document not advertising it.
         conn |> send_resp(404, "") |> halt()
+
+      {:error, :missing_initial_access_token} ->
+        # RFC 6750 §3.1 — a request without authentication gets a challenge
+        # without an error code.
+        conn
+        |> put_resp_header("cache-control", "no-store")
+        |> put_resp_header("www-authenticate", Errors.bearer_challenge([]))
+        |> send_resp(401, "")
+        |> halt()
 
       {:error, :invalid_initial_access_token} ->
         # RFC 7591 §3.2.2 — Bearer-auth failure, not a metadata error.
@@ -201,9 +210,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   # present. Used by `/register` to forward an RFC 7591 initial access
   # token into the protocol core.
   defp extract_bearer(conn) do
-    case Plug.Conn.get_req_header(conn, "authorization") do
-      ["Bearer " <> token | _] when token != "" -> token
-      ["bearer " <> token | _] when token != "" -> token
+    case BearerPlug.__parse_bearer__(conn) do
+      {:ok, token} -> token
       _ -> nil
     end
   end

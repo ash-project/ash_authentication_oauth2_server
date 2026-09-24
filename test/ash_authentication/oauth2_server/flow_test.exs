@@ -121,10 +121,10 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
     end
 
     test "gated server rejects registration without an initial access token" do
-      # RFC 7591 §3.2.2 — this is a Bearer-auth failure (the
+      # RFC 6750 §3.1 — a request without authentication (the
       # controller must emit 401 with WWW-Authenticate), not a
       # `invalid_client_metadata` 400.
-      assert {:error, :invalid_initial_access_token} =
+      assert {:error, :missing_initial_access_token} =
                Register.register(Oauth2ServerTest.GatedServer, %{
                  "client_name" => "X",
                  "redirect_uris" => ["https://app.example.com/cb"]
