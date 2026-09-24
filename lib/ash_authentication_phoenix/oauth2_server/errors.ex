@@ -72,7 +72,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       |> Enum.reject(fn {_, v} -> is_nil(v) end)
       |> Enum.map_join(", ", fn {k, v} -> ~s|#{k}="#{escape_quoted(v)}"| end)
 
-    "Bearer " <> challenge
+    String.trim_trailing("Bearer " <> challenge)
   end
 
   # WWW-Authenticate quoted-string values: backslash-escape `"` and `\`.

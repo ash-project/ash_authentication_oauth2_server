@@ -232,6 +232,25 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert body["error"] == "invalid_token"
     end
 
+    test "401 without an error code when the initial access token is missing (RFC 6750 §3.1)" do
+      opts = ProtocolRouter.init(oauth2_server: Oauth2ServerTest.GatedServer)
+
+      conn =
+        conn(
+          :post,
+          "/register",
+          Jason.encode!(%{
+            "client_name" => "X",
+            "redirect_uris" => ["https://app.example.com/cb"]
+          })
+        )
+        |> put_req_header("content-type", "application/json")
+        |> ProtocolRouter.call(opts)
+
+      assert conn.status == 401
+      assert get_resp_header(conn, "www-authenticate") == ["Bearer"]
+    end
+
     test "accepts a registration with the correct initial access token" do
       opts =
         ProtocolRouter.init(oauth2_server: Oauth2ServerTest.GatedServer)
