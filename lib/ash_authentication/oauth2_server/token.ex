@@ -423,9 +423,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   @doc """
-  Revoke a token per RFC 7009. Always returns `:ok` regardless of whether the
-  token existed, was already revoked, or belonged to a different client — the
-  RFC requires the endpoint not to leak token state.
+  Revoke a token per RFC 7009.
 
   Only refresh tokens are revocable here: access tokens are stateless JWTs.
   When a refresh token is revoked, the entire descendant chain (rotated-to
@@ -436,30 +434,46 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
     * `"token"` (required) — the raw token string the client wishes to revoke.
     * `"client_id"` (required) — the public client identifier.
-    * `"token_type_hint"` (optional) — `"refresh_token"` or `"access_token"`.
-      Treated as a hint only; access-token revocation is a silent no-op.
+    * `"token_type_hint"` (optional) — ignored, because the server detects
+      the token type itself (RFC 7009 §2.1).
+
+  Returns:
+
+    * `:ok` — the token is revoked, or it is not a valid token (RFC 7009
+      §2.2).
+    * `{:error, :invalid_request}` — `token` or `client_id` is missing.
+    * `{:error, :invalid_client}` — the client is unknown.
+    * `{:error, :client_mismatch}` — the refresh token was issued to another
+      client. RFC 7009 §2.1 refuses the request.
+    * `{:error, :unsupported_token_type}` — the token is a valid access
+      token, which this server cannot revoke (RFC 7009 §2.2.1).
+    * `{:error, :server_error}` — the revocation did not complete. The
+      client must assume that the token is still valid (RFC 7009 §2.2.1).
   """
-  @spec revoke(server :: module(), params :: map(), opts()) :: :ok
-  def revoke(server, params, opts \\ [])
+  @spec revoke(server :: module(), params :: map(), opts()) :: :ok | {:error, atom()}
+  def revoke(server, params, opts \\ []) do
+    with :ok <- require_params(params, ["client_id", "token"]),
+         {:ok, _presented, client_id} <- resolve_client_id(server, params, opts) do
+      token = params["token"]
 
-  def revoke(server, %{"token" => raw, "client_id" => presented} = params, opts)
-      when is_binary(raw) and raw != "" and is_binary(presented) and presented != "" do
-    hash = hash_refresh(raw)
-
-    with {:ok, _presented, client_id} <- resolve_client_id(server, params, opts),
-         {:ok, %{client_id: ^client_id} = row} <- find_refresh(server, hash, opts) do
-      revoke_chain_by_id(server, row.chain_id, opts)
-    else
-      # RFC 7009 §2.2 — never leak whether the token (or client) existed.
-      _ -> :ok
+      server.refresh_token_resource()
+      |> Ash.Query.filter(token_hash == ^hash_refresh(token))
+      |> Ash.read_one(ash_opts(opts))
+      |> case do
+        {:ok, %{client_id: ^client_id} = row} -> revoke_chain_by_id(server, row.chain_id, opts)
+        {:ok, nil} -> revoke_access_token(server, token)
+        {:ok, _row} -> {:error, :client_mismatch}
+        {:error, _} -> {:error, :server_error}
+      end
     end
-
-    :ok
-  rescue
-    _ -> :ok
   end
 
-  def revoke(_server, _params, _opts), do: :ok
+  defp revoke_access_token(server, token) do
+    case Jwt.verify(server, token) do
+      {:ok, _claims} -> {:error, :unsupported_token_type}
+      {:error, _} -> :ok
+    end
+  end
 
   defp find_refresh(server, hash, opts) do
     server.refresh_token_resource()
@@ -520,7 +534,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
             "ended with status #{inspect(status)}: #{inspect(errors)}"
         )
 
-        :ok
+        {:error, :server_error}
     end
   end
 

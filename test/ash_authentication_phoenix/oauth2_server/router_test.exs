@@ -18,7 +18,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
 
   require Ash.Query
 
-  alias AshAuthentication.Oauth2Server.{Jwt, PKCE}
+  alias AshAuthentication.Oauth2Server.{Authorize, Jwt, PKCE, Token}
 
   alias AshAuthentication.Phoenix.Oauth2Server.{ConsentRouter, Errors, ProtocolRouter}
   alias Oauth2ServerTest.Server
@@ -595,6 +595,97 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert conn.status == 400
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "unsupported_grant_type"
+    end
+  end
+
+  describe "ProtocolRouter: POST /revoke (RFC 7009)" do
+    defp issue_tokens(user, client_id) do
+      {verifier, challenge} = pkce()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_query(client_id, "https://chat.example.com/cb", challenge)
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      {:ok, tokens} =
+        Token.exchange_authorization_code(Server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "code_verifier" => verifier,
+          "client_id" => client_id
+        })
+
+      tokens
+    end
+
+    defp revoke(params) do
+      conn(:post, "/revoke", params)
+      |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> call_protocol()
+    end
+
+    defp error_of(conn), do: Jason.decode!(conn.resp_body)["error"]
+
+    test "revokes the client's own refresh token", %{user: user} do
+      {client_id, _} = create_client_for_authorize()
+      tokens = issue_tokens(user, client_id)
+
+      assert revoke(%{"token" => tokens.refresh_token, "client_id" => client_id}).status == 200
+
+      assert {:error, :revoked} =
+               Token.exchange_refresh_token(Server, %{
+                 "refresh_token" => tokens.refresh_token,
+                 "client_id" => client_id
+               })
+    end
+
+    test "answers 200 for a token that is not valid (§2.2)" do
+      {client_id, _} = create_client_for_authorize()
+      assert revoke(%{"token" => "not-a-token", "client_id" => client_id}).status == 200
+    end
+
+    test "rejects a request without token or client_id with invalid_request" do
+      {client_id, _} = create_client_for_authorize()
+
+      for params <- [%{"client_id" => client_id}, %{"token" => "x"}] do
+        conn = revoke(params)
+        assert conn.status == 400
+        assert error_of(conn) == "invalid_request"
+      end
+    end
+
+    test "rejects an unknown client with invalid_client" do
+      conn = revoke(%{"token" => "x", "client_id" => Ash.UUIDv7.generate()})
+      assert conn.status == 400
+      assert error_of(conn) == "invalid_client"
+    end
+
+    test "refuses a refresh token of another client (§2.1)", %{user: user} do
+      {client_id, _} = create_client_for_authorize()
+      {other_client_id, _} = create_client_for_authorize()
+      tokens = issue_tokens(user, client_id)
+
+      conn = revoke(%{"token" => tokens.refresh_token, "client_id" => other_client_id})
+      assert conn.status == 400
+      assert error_of(conn) == "invalid_grant"
+
+      assert {:ok, _} =
+               Token.exchange_refresh_token(Server, %{
+                 "refresh_token" => tokens.refresh_token,
+                 "client_id" => client_id
+               })
+    end
+
+    test "answers unsupported_token_type for an access token (§2.2.1)", %{user: user} do
+      {client_id, _} = create_client_for_authorize()
+      tokens = issue_tokens(user, client_id)
+
+      conn = revoke(%{"token" => tokens.access_token, "client_id" => client_id})
+      assert conn.status == 400
+      assert error_of(conn) == "unsupported_token_type"
     end
   end
 
