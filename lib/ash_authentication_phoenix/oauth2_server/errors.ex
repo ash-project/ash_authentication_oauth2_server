@@ -151,7 +151,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       :reuse -> {400, "invalid_grant", "code or refresh token already used"}
       :expired -> {400, "invalid_grant", "expired"}
       :pkce -> {400, "invalid_grant", "PKCE verification failed"}
-      :resource_mismatch -> {400, "invalid_grant", "resource does not match"}
+      :resource_mismatch -> {400, "invalid_grant", "grant was issued for a different resource"}
+      :invalid_target -> {400, "invalid_target", "requested resource is not acceptable"}
       :redirect_mismatch -> {400, "invalid_grant", "redirect_uri mismatch"}
       :invalid_code -> {400, "invalid_grant", "code not found or invalid"}
       :invalid_refresh -> {400, "invalid_grant", "refresh token invalid"}
