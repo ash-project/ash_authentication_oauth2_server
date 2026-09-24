@@ -847,5 +847,63 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:error, :revoked} =
                Token.exchange_refresh_token(Server, refresh_params.(second.refresh_token, nil))
     end
+
+    test "scope on refresh narrows the access token and rejects a wider scope (OAuth 2.1 §4.3.1)",
+         %{user: user} do
+      server = Oauth2ServerTest.DynamicScopesServer
+
+      {:ok, client, _} =
+        Register.register(server, %{
+          "client_name" => "Test",
+          "redirect_uris" => ["https://chat.example.com/cb"]
+        })
+
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          server,
+          client
+          |> authorize_params(challenge, "https://chat.example.com/cb")
+          |> Map.merge(%{"scope" => "mcp dynamic.scope", "resource" => server.resource_url()})
+        )
+
+      code = Authorize.issue_code!(server, user, validated)
+
+      {:ok, first} =
+        Token.exchange_authorization_code(server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "code_verifier" => verifier,
+          "client_id" => client.id
+        })
+
+      refresh = fn rt, scope ->
+        Token.exchange_refresh_token(server, %{
+          "grant_type" => "refresh_token",
+          "refresh_token" => rt,
+          "client_id" => client.id,
+          "scope" => scope
+        })
+      end
+
+      assert {:error, :invalid_scope} = refresh.(first.refresh_token, "mcp other")
+
+      assert {:ok, narrowed} = refresh.(first.refresh_token, "mcp")
+      assert narrowed.scope == "mcp"
+      assert {:ok, %{"scope" => "mcp"}} = Jwt.verify(server, narrowed.access_token)
+
+      # The new refresh token keeps the scope of the grant.
+      assert {:ok, full} = refresh.(narrowed.refresh_token, nil)
+      assert full.scope == "mcp dynamic.scope"
+
+      # A replay is reuse, even when it also asks for a wider scope.
+      assert {:error, :reuse} = refresh.(first.refresh_token, "mcp other")
+
+      # A scope that is not a string is a malformed request.
+      for scope <- [%{"x" => "y"}, ["mcp"]] do
+        assert {:error, :invalid_request} = refresh.(full.refresh_token, scope)
+      end
+    end
   end
 end

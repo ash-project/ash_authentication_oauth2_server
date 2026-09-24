@@ -101,6 +101,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp present?(value), do: is_binary(value) and value != ""
 
+  # A form body like `scope[x]=y`, or a JSON object, decodes to a map. That
+  # is a malformed parameter, `invalid_request` (OAuth 2.1 §3.2.4).
+  defp check_optional_string(params, key) do
+    if is_nil(params[key]) or is_binary(params[key]),
+      do: :ok,
+      else: {:error, :invalid_request}
+  end
+
   # Map the presented `client_id` param to the id stored on codes /
   # refresh rows. Ordinary client_ids pass through unchanged; URL-shaped
   # ones (Client ID Metadata Documents) resolve to the client row that was
@@ -226,6 +234,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   def exchange_refresh_token(server, params, opts) do
     with :ok <- require_params(params, ["client_id", "refresh_token"]),
+         :ok <- check_optional_string(params, "scope"),
          {:ok, presented_client_id, client_id} <- resolve_client_id(server, params, opts) do
       raw = params["refresh_token"]
       do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts)
@@ -243,28 +252,33 @@ defmodule AshAuthentication.Oauth2Server.Token do
     {new_raw, new_hash} = generate_refresh()
     new_id = Ash.UUIDv7.generate()
 
-    case atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
-      {:ok, old_row} ->
-        complete_rotation(server, old_row, presented_client_id, new_id, new_hash, new_raw, opts)
+    with {:ok, scope} <-
+           requested_scope(server, hash, params, client_id, expected_resource, resource, opts) do
+      new_refresh = {new_id, new_hash, new_raw}
 
-      :no_match ->
-        case disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
-          :reuse ->
-            revoke_chain_by_hash(server, hash, opts)
-            {:error, :reuse}
+      case atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
+        {:ok, old_row} ->
+          complete_rotation(server, old_row, scope, presented_client_id, new_refresh, opts)
 
-          other ->
-            {:error, other}
-        end
+        :no_match ->
+          case disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
+            :reuse ->
+              revoke_chain_by_hash(server, hash, opts)
+              {:error, :reuse}
 
-      {:bulk_error, errors} ->
-        # The bulk update itself failed for a real reason (validation,
-        # constraint, DB connectivity, etc.). Log it for ops visibility,
-        # don't leak details to the caller, and skip the disambiguation
-        # read — we already know the operation didn't complete.
-        Logger.error("Oauth2Server: refresh-token bulk_update failed: " <> inspect(errors))
+            other ->
+              {:error, other}
+          end
 
-        {:error, :invalid_refresh}
+        {:bulk_error, errors} ->
+          # The bulk update itself failed for a real reason (validation,
+          # constraint, DB connectivity, etc.). Log it for ops visibility,
+          # don't leak details to the caller, and skip the disambiguation
+          # read — we already know the operation didn't complete.
+          Logger.error("Oauth2Server: refresh-token bulk_update failed: " <> inspect(errors))
+
+          {:error, :invalid_refresh}
+      end
     end
   end
 
@@ -310,8 +324,13 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  defp complete_rotation(server, old_row, presented_client_id, new_id, new_hash, new_raw, opts) do
+  # OAuth 2.1 §4.3.1: an omitted scope means the scope of the grant. The
+  # access token gets the requested scope, and the new refresh token keeps
+  # the scope of the grant (RFC 6749 §6).
+  defp complete_rotation(server, old_row, scope, presented_client_id, new_refresh, opts) do
+    {new_id, new_hash, new_raw} = new_refresh
     tenant = Keyword.get(opts, :tenant)
+    access_scope = scope || old_row.scope
 
     new_expires_at =
       DateTime.add(DateTime.utc_now(), server.refresh_token_lifetime(), :second)
@@ -337,7 +356,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
            Jwt.mint(server,
              sub: old_row.user_id,
              client_id: presented_client_id,
-             scope: old_row.scope,
+             scope: access_scope,
              tenant: tenant
            ) do
       touch_client_by_id(server, old_row.client_id, opts)
@@ -348,7 +367,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
          token_type: "Bearer",
          expires_in: server.access_token_lifetime(),
          refresh_token: new_raw,
-         scope: old_row.scope
+         scope: access_scope
        }}
     end
   end
@@ -360,8 +379,29 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # but not all data layers support that
   defp disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
     case find_refresh(server, hash, opts) do
-      {:ok, row} -> classify_row(row, client_id, expected_resource, resource)
+      {:ok, row} -> classify_row(row, client_id, expected_resource, resource) || :invalid_refresh
       {:error, _} -> :invalid_refresh
+    end
+  end
+
+  # A requested scope beyond the grant is `invalid_scope` (OAuth 2.1
+  # §4.3.1). The rotate filter cannot compare scopes, so a request with a
+  # scope reads the row first. Only a token that passes every other check
+  # gets the scope error. A failing token takes the rotate path, which
+  # reports its own error and detects reuse.
+  defp requested_scope(server, hash, params, client_id, expected_resource, resource, opts) do
+    requested = String.split(params["scope"] || "", " ", trim: true)
+
+    with [_ | _] <- requested,
+         {:ok, row} <- find_refresh(server, hash, opts),
+         nil <- classify_row(row, client_id, expected_resource, resource) do
+      granted = String.split(row.scope, " ", trim: true)
+
+      if Enum.all?(requested, &(&1 in granted)),
+        do: {:ok, Enum.join(requested, " ")},
+        else: {:error, :invalid_scope}
+    else
+      _ -> {:ok, nil}
     end
   end
 
@@ -377,7 +417,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
       row.client_id != client_id -> :client_mismatch
       row.resource_uri != expected_resource -> :resource_mismatch
       not requested_resource_ok?(resource, expected_resource) -> :invalid_target
-      true -> :invalid_refresh
+      true -> nil
     end
   end
 

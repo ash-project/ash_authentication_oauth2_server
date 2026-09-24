@@ -159,6 +159,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       :revoked -> {400, "invalid_grant", "refresh token revoked"}
       :client_mismatch -> {400, "invalid_grant", "client mismatch"}
       :invalid_client -> {400, "invalid_client", "unknown client"}
+      :invalid_scope -> {400, "invalid_scope", "requested scope exceeds the grant"}
       :invalid_request -> {400, "invalid_request", "missing required parameters"}
       :refresh_create_failed -> {500, "server_error", "could not issue refresh token"}
       _ -> {400, "invalid_request", "request could not be processed"}
