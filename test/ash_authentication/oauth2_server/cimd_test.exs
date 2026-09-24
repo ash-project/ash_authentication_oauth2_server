@@ -235,7 +235,8 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
       {_verifier, challenge} = pkce_pair()
 
       params = Map.put(authorize_params(challenge), "resource", Server.resource_url())
-      assert {:error, "invalid_client", description} = Authorize.validate_request(Server, params)
+      assert {:error, :bad_client, "invalid_client", description} =
+               Authorize.validate_request(Server, params)
       assert description =~ "not supported"
     end
   end
