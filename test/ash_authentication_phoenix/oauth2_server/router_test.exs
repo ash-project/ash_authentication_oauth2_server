@@ -357,6 +357,27 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       refute Map.has_key?(params, "state")
     end
 
+    test "redirects an error to the only registered redirect_uri when it is omitted",
+         %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_v, challenge} = pkce()
+
+      query =
+        client_id
+        |> authorize_query(redirect_uri, challenge)
+        |> Map.delete("redirect_uri")
+        |> Map.put("response_type", "token")
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(query))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri <> "?")
+    end
+
     test "never redirects an unknown client", %{user: user} do
       {_v, challenge} = pkce()
 

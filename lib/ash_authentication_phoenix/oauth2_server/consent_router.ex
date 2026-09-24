@@ -167,17 +167,24 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   # RFC 6749 §4.1.2.1: once the client and redirect_uri are validated,
   # error responses MUST go back via 302 with `error`, `error_description`,
   # and `state` so the client can surface the failure to the end user.
-  # `Authorize.validate_request/3` validates both before it returns any
-  # redirectable error, with the same exact match as a successful request.
+  # `Authorize.error_redirect_uri/3` applies the same exact match as a
+  # successful request. Without a valid target the error goes to the user
+  # agent directly (OAuth 2.1 §4.1.2.1).
   defp redirect_authorize_error(conn, server, params, code, desc) do
-    redirect_with_oauth_error(
-      conn,
-      server,
-      Map.fetch!(params, "redirect_uri"),
-      Map.get(params, "state"),
-      code,
-      desc
-    )
+    case Authorize.error_redirect_uri(server, params, tenant_opts(conn)) do
+      {:ok, redirect_uri} ->
+        redirect_with_oauth_error(
+          conn,
+          server,
+          redirect_uri,
+          Map.get(params, "state"),
+          code,
+          desc
+        )
+
+      :error ->
+        Errors.send_oauth_error(conn, 400, code, desc)
+    end
   end
 
   # RFC 9207 §2 requires `iss` on error responses too.
