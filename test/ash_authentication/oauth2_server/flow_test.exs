@@ -592,6 +592,48 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
                  "client_id" => "unknown-client"
                })
     end
+
+    test "a failed exchange leaves the code usable, and grant errors come before target errors",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      params = %{
+        "grant_type" => "authorization_code",
+        "code" => code.id,
+        "code_verifier" => verifier,
+        "client_id" => client.id
+      }
+
+      assert {:error, :pkce} =
+               Token.exchange_authorization_code(Server, %{params | "code_verifier" => "wrong"})
+
+      assert {:error, :redirect_mismatch} =
+               Token.exchange_authorization_code(
+                 Server,
+                 Map.merge(params, %{
+                   "redirect_uri" => "https://other.example.com/cb",
+                   "resource" => "https://other.example.com/api"
+                 })
+               )
+
+      assert {:error, :invalid_target} =
+               Token.exchange_authorization_code(
+                 Server,
+                 Map.put(params, "resource", "https://other.example.com/api")
+               )
+
+      assert {:ok, _} = Token.exchange_authorization_code(Server, params)
+      assert {:error, :reuse} = Token.exchange_authorization_code(Server, params)
+    end
   end
 
   describe "refresh_token grant" do

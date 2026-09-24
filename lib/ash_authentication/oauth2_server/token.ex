@@ -48,8 +48,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   @doc """
   Exchange an authorization code (with PKCE verifier) for an access + refresh
-  token pair. Consumes the code atomically; a second call with the same code
-  returns `{:error, :reuse}`.
+  token pair. Consumes the code atomically once every check has passed; a
+  second call with the same code returns `{:error, :reuse}`.
   """
   @spec exchange_authorization_code(server :: module(), params :: map(), opts()) ::
           {:ok, token_response()}
@@ -61,10 +61,11 @@ defmodule AshAuthentication.Oauth2Server.Token do
     with :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
          {:ok, presented_client_id, canonical_client_id} <-
            resolve_client_id(server, params, opts),
-         {:ok, code, client} <- consume_code(server, params, canonical_client_id, opts),
+         {:ok, code} <- load_code(server, params, canonical_client_id, opts),
          :ok <- verify_pkce(code, params),
-         :ok <- check_resource_match(server, params, code, secret_context),
          :ok <- check_redirect_match(params, code),
+         :ok <- check_resource_match(server, params, code, secret_context),
+         {:ok, code, client} <- consume_code(server, code, opts),
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
              # The claim carries the identifier the client authenticates
@@ -125,14 +126,22 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp resolve_client_id(_server, _params, _opts), do: {:error, :invalid_request}
 
-  defp consume_code(server, %{"code" => code_id}, client_id, opts)
-       when is_binary(code_id) and is_binary(client_id) do
+  # A request that fails any check leaves the code unconsumed, so a client
+  # that sent a bad verifier or resource can retry with the same code.
+  defp load_code(server, %{"code" => code_id}, client_id, opts) do
     with {:ok, code} <-
            code_or_error(Ash.get(server.authorization_code_resource(), code_id, ash_opts(opts))),
          :ok <- check_client_match(code, client_id),
          :ok <- check_not_consumed(code),
-         :ok <- check_not_expired(code),
-         {:ok, code} <-
+         :ok <- check_not_expired(code) do
+      {:ok, code}
+    end
+  end
+
+  # `:consume` validates `consumed_at` atomically, so a concurrent request
+  # that consumed the code first makes this one fail.
+  defp consume_code(server, code, opts) do
+    with {:ok, code} <-
            code
            |> Ash.Changeset.for_update(:consume, %{})
            |> Ash.update(ash_opts(opts))
@@ -142,8 +151,6 @@ defmodule AshAuthentication.Oauth2Server.Token do
       {:ok, code, client}
     end
   end
-
-  defp consume_code(_, _, _, _), do: {:error, :invalid_request}
 
   defp code_or_error({:ok, _} = ok), do: ok
   defp code_or_error({:error, _}), do: {:error, :invalid_code}
