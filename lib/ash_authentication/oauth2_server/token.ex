@@ -37,7 +37,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
           access_token: String.t(),
           token_type: String.t(),
           expires_in: pos_integer(),
-          refresh_token: String.t(),
+          refresh_token: String.t() | nil,
           scope: String.t()
         }
 
@@ -59,13 +59,13 @@ defmodule AshAuthentication.Oauth2Server.Token do
     secret_context = secret_context(tenant)
 
     with :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
-         {:ok, presented_client_id, canonical_client_id} <-
-           resolve_client_id(server, params, opts),
-         {:ok, code} <- load_code(server, params, canonical_client_id, opts),
+         {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
+         :ok <- check_grant_type(client, "authorization_code"),
+         {:ok, code} <- load_code(server, params, client.id, opts),
          :ok <- verify_pkce(code, params),
          :ok <- check_redirect_match(params, code),
          :ok <- check_resource_match(server, params, code, secret_context),
-         {:ok, code, client} <- consume_code(server, code, opts),
+         {:ok, code} <- consume_code(code, opts),
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
              # The claim carries the identifier the client authenticates
@@ -75,7 +75,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
              scope: code.scope,
              tenant: tenant
            ),
-         {:ok, refresh_token} <- issue_refresh_token(server, client.id, code, opts) do
+         {:ok, refresh_token} <- maybe_issue_refresh_token(server, client, code, opts) do
       touch_client(client, opts)
 
       {:ok,
@@ -114,11 +114,11 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # ones (Client ID Metadata Documents) resolve to the client row that was
   # upserted at authorize time — a database lookup only, never a fetch.
   # An unknown client is `invalid_client` (OAuth 2.1 §3.2.4), checked
-  # before the grant. Returns `{:ok, presented, canonical}`.
+  # before the grant. Returns `{:ok, presented, client}`.
   defp resolve_client_id(server, %{"client_id" => "https://" <> _ = url}, opts) do
     with true <- server.cimd_enabled?(),
          {:ok, client} <- CIMD.find_client(server, url, opts) do
-      {:ok, url, client.id}
+      {:ok, url, client}
     else
       _ -> {:error, :invalid_client}
     end
@@ -127,12 +127,29 @@ defmodule AshAuthentication.Oauth2Server.Token do
   defp resolve_client_id(server, %{"client_id" => client_id}, opts)
        when is_binary(client_id) and client_id != "" do
     case Ash.get(server.client_resource(), client_id, ash_opts(opts)) do
-      {:ok, _client} -> {:ok, client_id, client_id}
+      {:ok, client} -> {:ok, client_id, client}
       _ -> {:error, :invalid_client}
     end
   end
 
   defp resolve_client_id(_server, _params, _opts), do: {:error, :invalid_request}
+
+  # OAuth 2.1 §3.2.4: a client may use only the grant types it registered.
+  # A client without registered grant types has the RFC 7591 §2 default,
+  # `authorization_code` alone.
+  defp check_grant_type(client, grant_type) do
+    if grant_type in client_grant_types(client), do: :ok, else: {:error, :unauthorized_client}
+  end
+
+  defp client_grant_types(%{grant_types: [_ | _] = grant_types}), do: grant_types
+  defp client_grant_types(_client), do: ["authorization_code"]
+
+  # A client that cannot use the refresh_token grant gets no refresh token.
+  defp maybe_issue_refresh_token(server, client, code, opts) do
+    if "refresh_token" in client_grant_types(client),
+      do: issue_refresh_token(server, client.id, code, opts),
+      else: {:ok, nil}
+  end
 
   # A request that fails any check leaves the code unconsumed, so a client
   # that sent a bad verifier or resource can retry with the same code.
@@ -148,16 +165,11 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   # `:consume` validates `consumed_at` atomically, so a concurrent request
   # that consumed the code first makes this one fail.
-  defp consume_code(server, code, opts) do
-    with {:ok, code} <-
-           code
-           |> Ash.Changeset.for_update(:consume, %{})
-           |> Ash.update(ash_opts(opts))
-           |> code_or_error(),
-         {:ok, client} <-
-           code_or_error(Ash.get(server.client_resource(), code.client_id, ash_opts(opts))) do
-      {:ok, code, client}
-    end
+  defp consume_code(code, opts) do
+    code
+    |> Ash.Changeset.for_update(:consume, %{})
+    |> Ash.update(ash_opts(opts))
+    |> code_or_error()
   end
 
   defp code_or_error({:ok, _} = ok), do: ok
@@ -235,9 +247,10 @@ defmodule AshAuthentication.Oauth2Server.Token do
   def exchange_refresh_token(server, params, opts) do
     with :ok <- require_params(params, ["client_id", "refresh_token"]),
          :ok <- check_optional_string(params, "scope"),
-         {:ok, presented_client_id, client_id} <- resolve_client_id(server, params, opts) do
+         {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
+         :ok <- check_grant_type(client, "refresh_token") do
       raw = params["refresh_token"]
-      do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts)
+      do_exchange_refresh_token(server, params, raw, presented_client_id, client.id, opts)
     end
   end
 
@@ -453,7 +466,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   @spec revoke(server :: module(), params :: map(), opts()) :: :ok | {:error, atom()}
   def revoke(server, params, opts \\ []) do
     with :ok <- require_params(params, ["client_id", "token"]),
-         {:ok, _presented, client_id} <- resolve_client_id(server, params, opts) do
+         {:ok, _presented, %{id: client_id}} <- resolve_client_id(server, params, opts) do
       token = params["token"]
 
       server.refresh_token_resource()

@@ -73,7 +73,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       "/register",
       Jason.encode!(%{
         "client_name" => "Test",
-        "redirect_uris" => [redirect_uri]
+        "redirect_uris" => [redirect_uri],
+        "grant_types" => ["authorization_code", "refresh_token"]
       })
     )
     |> put_req_header("content-type", "application/json")
@@ -593,6 +594,34 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
 
       assert token_conn.status == 400
       assert Jason.decode!(token_conn.resp_body)["error"] == "invalid_target"
+    end
+
+    test "a refresh by a client without the refresh_token grant is unauthorized_client" do
+      conn =
+        conn(
+          :post,
+          "/register",
+          Jason.encode!(%{
+            "client_name" => "X",
+            "redirect_uris" => ["https://chat.example.com/cb"]
+          })
+        )
+        |> put_req_header("content-type", "application/json")
+        |> call_protocol()
+
+      client_id = Jason.decode!(conn.resp_body)["client_id"]
+
+      conn =
+        conn(:post, "/token", %{
+          "grant_type" => "refresh_token",
+          "refresh_token" => "any",
+          "client_id" => client_id
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "unauthorized_client"
     end
 
     test "a missing grant_type returns 400 + invalid_request" do

@@ -41,7 +41,8 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
     {:ok, client, body} =
       Register.register(Server, %{
         "client_name" => "Test Client",
-        "redirect_uris" => [redirect_uri]
+        "redirect_uris" => [redirect_uri],
+        "grant_types" => ["authorization_code", "refresh_token"]
       })
 
     {client, body}
@@ -71,7 +72,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
 
       assert client.client_name == "Test Client"
       assert client.redirect_uris == ["https://chat.example.com/cb"]
-      assert client.grant_types == ["authorization_code"]
+      assert client.grant_types == ["authorization_code", "refresh_token"]
       assert client.token_endpoint_auth_method == "none"
       assert body["client_id"] == client.id
       assert body["scope"] == "mcp"
@@ -969,7 +970,8 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       {:ok, client, _} =
         Register.register(server, %{
           "client_name" => "Test",
-          "redirect_uris" => ["https://chat.example.com/cb"]
+          "redirect_uris" => ["https://chat.example.com/cb"],
+          "grant_types" => ["authorization_code", "refresh_token"]
         })
 
       {verifier, challenge} = pkce_pair()
@@ -1018,6 +1020,44 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       for scope <- [%{"x" => "y"}, ["mcp"]] do
         assert {:error, :invalid_request} = refresh.(full.refresh_token, scope)
       end
+    end
+
+    test "a client without the refresh_token grant gets no refresh token (OAuth 2.1 §3.2.4)",
+         %{user: user} do
+      {:ok, client, body} =
+        Register.register(Server, %{
+          "client_name" => "Default grants",
+          "redirect_uris" => ["https://chat.example.com/cb"]
+        })
+
+      assert body["grant_types"] == ["authorization_code"]
+
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      assert {:ok, %{refresh_token: nil, access_token: access_token}} =
+               Token.exchange_authorization_code(Server, %{
+                 "grant_type" => "authorization_code",
+                 "code" => code.id,
+                 "code_verifier" => verifier,
+                 "client_id" => client.id
+               })
+
+      assert is_binary(access_token)
+
+      assert {:error, :unauthorized_client} =
+               Token.exchange_refresh_token(Server, %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => "any",
+                 "client_id" => client.id
+               })
     end
   end
 end
