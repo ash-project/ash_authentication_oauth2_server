@@ -213,6 +213,18 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       end
     end
 
+    test "a missing scope is invalid_scope (OAuth 2.1 §1.4.1)" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+
+      params =
+        client
+        |> authorize_params(challenge, "https://chat.example.com/cb")
+        |> Map.delete("scope")
+
+      assert {:error, "invalid_scope", _} = Authorize.validate_request(Server, params)
+    end
+
     test "reports a malformed request before an unsupported value" do
       {client, _} = register_client()
       {_, challenge} = pkce_pair()
