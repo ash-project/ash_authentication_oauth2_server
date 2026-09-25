@@ -85,12 +85,32 @@ with **either** HTTP Basic **or** form-body credentials regardless of
 which of those two values is stored. Use `none` only for public clients;
 those cannot use this grant.
 
+A client with any method other than `none` is confidential on **every**
+grant, not only this one: if you also give it `authorization_code` /
+`refresh_token`, it must present its secret on those token requests too
+(RFC 6749 §4.1.3 / §6), otherwise the request fails with
+`invalid_client`. The check runs before the code is consumed or the
+refresh token rotated, so a failed attempt doesn't burn either.
+
+`grant_types` is enforced on every grant. A client that lists only
+`client_credentials` cannot start `/oauth/authorize` or redeem a code
+(`unauthorized_client`), so a machine client can't be used to obtain
+user-delegated tokens. The `refresh_token` grant is allowed when the
+client lists `refresh_token` **or** `authorization_code`, because refresh
+tokens are issued with every code exchange. A `nil` `grant_types` means
+the RFC 7591 default, `["authorization_code"]`.
+
 ## Protecting resource-server routes
 
 Wire a pipeline that uses `ClientBearerPlug`. Do **not** reuse the user
-`BearerPlug`: tokens from this grant set both `sub` and `client_id` to the
-client’s id, and `BearerPlug` rejects them so they cannot impersonate a
-user even if ids collide across resources.
+`BearerPlug`: tokens from this grant carry a reserved
+`"gty" => "client_credentials"` claim (and set both `sub` and `client_id`
+to the client’s id). `BearerPlug` rejects any token with a `gty` claim,
+and `ClientBearerPlug` requires it, so machine and user tokens cannot
+stand in for each other even if a client id and a user id collide.
+`:extra_access_token_claims` cannot set `gty`. If you verify tokens
+yourself with `AshAuthentication.Oauth2Server.Jwt.verify/2`, check `gty`
+the same way before treating `sub` as a user id.
 
 ```elixir
 pipeline :api do

@@ -70,13 +70,15 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   is the right OAuth semantic — the access token is a delegated grant
   from user → client, distinct from the user's own permissions.
 
-  ## Person-token fingerprint
+  ## Person tokens only
 
-  Person-delegated tokens mint `sub` as the user id and `client_id` as
-  the OAuth client. Machine (`client_credentials`) tokens mint both to
-  the client id. This plug rejects tokens where `sub == client_id` so a
-  machine token cannot authenticate as a user even if ids collide across
-  resources. Use `ClientBearerPlug` for machine routes.
+  Machine (`client_credentials`) tokens carry a reserved
+  `"gty" => "client_credentials"` claim; person-delegated tokens never
+  carry `gty`. This plug rejects any token with a `gty` claim, so a
+  machine token cannot authenticate as a user even if a client id and a
+  user id collide. As defense in depth it also rejects tokens where
+  `sub == client_id` (the machine-token shape). Use `ClientBearerPlug`
+  for machine routes.
 
   ### Gating an action on a scope
 
@@ -137,10 +139,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
     end
   end
 
-  # Machine tokens set sub == client_id; person tokens differ.
-  defp ensure_person_token(%{"sub" => sub, "client_id" => client_id})
+  # Person tokens never carry `gty` (only machine tokens do), and never
+  # have sub == client_id (the machine-token shape).
+  defp ensure_person_token(%{"sub" => sub, "client_id" => client_id} = claims)
        when is_binary(sub) and sub != "" and is_binary(client_id) and client_id != "" and
-              sub != client_id do
+              sub != client_id and not is_map_key(claims, "gty") do
     :ok
   end
 

@@ -964,11 +964,15 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       client = create_machine_client()
 
       conn =
-        conn(:post, "/token", Jason.encode!(%{
-          "grant_type" => "client_credentials",
-          "client_id" => client.id,
-          "client_secret" => @machine_secret
-        }))
+        conn(
+          :post,
+          "/token",
+          Jason.encode!(%{
+            "grant_type" => "client_credentials",
+            "client_id" => client.id,
+            "client_secret" => @machine_secret
+          })
+        )
         |> put_req_header("content-type", "application/json")
         |> call_machine_protocol()
 
