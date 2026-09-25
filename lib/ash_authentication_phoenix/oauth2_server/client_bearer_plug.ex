@@ -31,13 +31,15 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug do
     * **`Ash.PlugHelpers.get_actor(conn)`** — the client resource record
     * **`conn.assigns.oauth_claims`** — verified JWT claims (including `scope`)
 
-  ## Machine-token fingerprint
+  ## Machine tokens only
 
-  Client-credentials tokens mint `sub` and `client_id` to the same client
-  id. Person-delegated tokens mint `sub` as the user id and `client_id` as
-  the OAuth client. This plug requires `sub == client_id` so a user access
-  token cannot authenticate as a machine client even if ids collide across
-  resources.
+  Client-credentials tokens carry a reserved
+  `"gty" => "client_credentials"` claim, which person-delegated tokens
+  never carry and `:extra_access_token_claims` cannot set. This plug
+  requires that claim, and additionally that `sub == client_id` (both are
+  minted from the client row's id), so a user access token cannot
+  authenticate as a machine client even if a user id and a client id
+  collide.
 
   On every request the plug also reloads the client and confirms it still
   lists `client_credentials` with a confidential auth method, and that
@@ -67,8 +69,13 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug do
     end
   end
 
-  # Machine tokens set both claims to the client id; user tokens differ.
-  defp ensure_machine_token(%{"sub" => sub, "client_id" => client_id})
+  # Machine tokens carry gty=client_credentials and set both claims to
+  # the client id; user tokens have neither property.
+  defp ensure_machine_token(%{
+         "gty" => "client_credentials",
+         "sub" => sub,
+         "client_id" => client_id
+       })
        when is_binary(sub) and sub != "" and is_binary(client_id) and client_id != "" and
               sub == client_id do
     :ok

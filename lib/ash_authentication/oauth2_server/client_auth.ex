@@ -46,6 +46,35 @@ defmodule AshAuthentication.Oauth2Server.ClientAuth do
     end
   end
 
+  @doc """
+  Like `credentials/2`, but for grants where client authentication is
+  only required for confidential clients (`authorization_code`,
+  `refresh_token`).
+
+  Returns `:none` when the request presents no client secret at all —
+  no `Authorization: Basic …` header and no (non-blank) body
+  `client_secret` — which is the public-client case. Otherwise behaves
+  exactly like `credentials/2`, including rejecting Basic combined with
+  body credentials.
+  """
+  @spec optional_credentials(Plug.Conn.t() | map(), map()) ::
+          :none
+          | {:ok, client_id :: String.t(), client_secret :: String.t(), auth_via()}
+          | {:error, :invalid_client | :invalid_request}
+  def optional_credentials(conn_or_headers, params) when is_map(params) do
+    with :ok <- ensure_scalar_strings(params) do
+      case basic_credentials(conn_or_headers) do
+        :absent ->
+          if is_nil(blank_to_nil(params["client_secret"])),
+            do: :none,
+            else: resolve(:absent, params)
+
+        basic ->
+          resolve(basic, params)
+      end
+    end
+  end
+
   defp resolve({:ok, basic_id, basic_secret}, params) do
     # RFC 6749 §5.2 invalid_request — "utilizes more than one mechanism
     # for authenticating the client" / "includes multiple credentials".
@@ -160,11 +189,9 @@ defmodule AshAuthentication.Oauth2Server.ClientAuth do
   end
 
   defp percent_decode(value) do
-    try do
-      {:ok, URI.decode(value)}
-    rescue
-      ArgumentError -> :error
-    end
+    {:ok, URI.decode(value)}
+  rescue
+    ArgumentError -> :error
   end
 
   defp blank_to_nil(nil), do: nil

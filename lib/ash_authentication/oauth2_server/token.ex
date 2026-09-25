@@ -30,7 +30,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   require Ash.Query
   require Logger
 
-  alias AshAuthentication.Oauth2Server.{CIMD, Jwt, PKCE}
+  alias AshAuthentication.Oauth2Server.{CIMD, ClientMetadata, Jwt, PKCE}
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -93,11 +93,16 @@ defmodule AshAuthentication.Oauth2Server.Token do
          extra <- server.extra_access_token_claims(client, %{"scope" => scope}, opts),
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
+             # Both from the stored row, never the presented value: the
+             # data layer may accept a non-canonical spelling of the id
+             # (e.g. an upper-case UUID) that would otherwise leak into
+             # the token and make `sub` and `client_id` disagree.
              sub: client.id,
-             client_id: client_id,
+             client_id: client.id,
              scope: scope,
              audience: audience,
              tenant: tenant,
+             grant_type: "client_credentials",
              extra_claims: extra
            ) do
       touch_client(client, opts)
@@ -173,15 +178,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # cannot distinguish "unknown client", "wrong secret", and "not allowed
   # this grant".
   defp ensure_client_credentials_allowed(client, secret) do
-    grants = List.wrap(Map.get(client, :grant_types))
-    method = Map.get(client, :token_endpoint_auth_method) || "none"
+    grants = ClientMetadata.allowed_grant_types(client)
 
     cond do
       "client_credentials" not in grants ->
         burn_client_auth_time(secret)
         {:error, :invalid_client}
 
-      method in [nil, "none"] ->
+      public_client?(client) ->
         burn_client_auth_time(secret)
         {:error, :invalid_client}
 
@@ -380,9 +384,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
     tenant = Keyword.get(opts, :tenant)
     secret_context = secret_context(tenant)
 
-    with :ok <- check_no_client_credentials(params, opts),
-         :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
+    with :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
          {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
+         :ok <- authenticate_client(server, client, params, opts),
          :ok <- check_grant_type(client, "authorization_code"),
          {:ok, code} <- load_code(server, params, client.id, opts),
          :ok <- verify_pkce(code, params),
@@ -436,9 +440,46 @@ defmodule AshAuthentication.Oauth2Server.Token do
       else: {:error, :invalid_request}
   end
 
+  # RFC 6749 §4.1.3 / §6: a confidential client MUST authenticate on every
+  # token request. Runs before the code is consumed or the refresh token
+  # rotated, so a caller without the secret cannot burn a legitimate
+  # client's grant.
+  defp authenticate_client(server, client, params, opts) do
+    if public_client?(client),
+      do: check_no_client_credentials(params, opts),
+      else: authenticate_confidential_client(server, client, params["client_secret"])
+  end
+
+  # Any method other than `none` (including ones this server doesn't
+  # implement, e.g. `private_key_jwt`) requires a verified secret — fail
+  # closed rather than treating unknown methods as public.
+  defp authenticate_confidential_client(server, client, secret)
+       when is_binary(secret) and secret != "" do
+    case server.verify_client_secret(client, secret) do
+      true ->
+        :ok
+
+      {:error, :verify_client_secret_not_configured} ->
+        Logger.warning(
+          "Oauth2Server: confidential client #{inspect(client.id)} cannot authenticate " <>
+            "because :verify_client_secret is nil"
+        )
+
+        {:error, :invalid_client}
+
+      _ ->
+        {:error, :invalid_client}
+    end
+  end
+
+  defp authenticate_confidential_client(_server, _client, _secret), do: {:error, :invalid_client}
+
+  defp public_client?(client),
+    do: Map.get(client, :token_endpoint_auth_method) in [nil, "none"]
+
   # OAuth 2.1 §3.2.2: the server MUST authenticate a client that includes
-  # client authentication. Every client here is public
-  # (`token_endpoint_auth_method: "none"`), so there is nothing to check
+  # client authentication. A public client
+  # (`token_endpoint_auth_method: "none"`) has nothing to check
   # the credentials against, and any credentials are `invalid_client`. More
   # than one mechanism is `invalid_request` (§3.2.4). An empty
   # `client_secret` counts as omitted (§3.2), which keeps the
@@ -594,10 +635,10 @@ defmodule AshAuthentication.Oauth2Server.Token do
   def exchange_refresh_token(server, params, opts \\ [])
 
   def exchange_refresh_token(server, params, opts) do
-    with :ok <- check_no_client_credentials(params, opts),
-         :ok <- require_params(params, ["client_id", "refresh_token"]),
+    with :ok <- require_params(params, ["client_id", "refresh_token"]),
          :ok <- check_optional_string(params, "scope"),
          {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
+         :ok <- authenticate_client(server, client, params, opts),
          :ok <- check_grant_type(client, "refresh_token") do
       raw = params["refresh_token"]
       do_exchange_refresh_token(server, params, raw, presented_client_id, client.id, opts)
@@ -819,9 +860,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
   """
   @spec revoke(server :: module(), params :: map(), opts()) :: :ok | {:error, atom()}
   def revoke(server, params, opts \\ []) do
-    with :ok <- check_no_client_credentials(params, opts),
-         :ok <- require_params(params, ["client_id", "token"]),
-         {:ok, _presented, %{id: client_id}} <- resolve_client_id(server, params, opts) do
+    with :ok <- require_params(params, ["client_id", "token"]),
+         {:ok, _presented, %{id: client_id} = client} <- resolve_client_id(server, params, opts),
+         :ok <- authenticate_client(server, client, params, opts) do
       token = params["token"]
 
       server.refresh_token_resource()

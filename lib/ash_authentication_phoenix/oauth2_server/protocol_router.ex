@@ -163,8 +163,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     result =
       with :ok <- reject_credentials_in_query(conn) do
         case Map.get(params, "grant_type") do
-          "authorization_code" -> Token.exchange_authorization_code(server, params, opts)
-          "refresh_token" -> Token.exchange_refresh_token(server, params, opts)
+          "authorization_code" ->
+            with {:ok, params} <- merge_client_auth(conn, params) do
+              Token.exchange_authorization_code(server, params, opts)
+            end
+
+          "refresh_token" ->
+            with {:ok, params} <- merge_client_auth(conn, params) do
+              Token.exchange_refresh_token(server, params, opts)
+            end
+
           "client_credentials" -> client_credentials(server, conn, params, opts)
           type when type in [nil, ""] -> {:error, :invalid_request}
           _ -> {:error, :unsupported_grant_type}
@@ -194,6 +202,23 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   @token_credential_query_params ~w(
     client_id client_secret client_assertion client_assertion_type
   )
+
+  # Public clients send only a body `client_id`; confidential clients also
+  # present a secret via Basic or the body. Normalize either presentation
+  # into `client_id` + `client_secret` params so `Token` can authenticate
+  # confidential clients (RFC 6749 §4.1.3 / §6).
+  defp merge_client_auth(conn, params) do
+    case ClientAuth.optional_credentials(conn, params) do
+      :none ->
+        {:ok, params}
+
+      {:ok, client_id, client_secret, _via} ->
+        {:ok, Map.merge(params, %{"client_id" => client_id, "client_secret" => client_secret})}
+
+      {:error, _} = error ->
+        error
+    end
+  end
 
   defp reject_credentials_in_query(conn) do
     qp = conn.query_params || %{}
@@ -225,7 +250,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   post "/revoke" do
     server = server!(conn.assigns.oauth2_server_router_opts)
 
-    case Token.revoke(server, conn.params || %{}, client_request_opts(conn)) do
+    result =
+      with {:ok, params} <- merge_client_auth(conn, conn.params || %{}) do
+        Token.revoke(server, params, client_request_opts(conn))
+      end
+
+    case result do
       :ok ->
         conn
         |> put_resp_header("cache-control", "no-store")

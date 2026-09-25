@@ -55,8 +55,8 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
       "token_endpoint" => issuer <> "/oauth/token",
       "revocation_endpoint" => issuer <> "/oauth/revoke",
       "response_types_supported" => ["code"],
-  # Only advertise `client_credentials` when `:verify_client_secret` is
-  # set (library default: `ClientSecret.verify/2`). Pass `nil` to disable.
+      # Only advertise `client_credentials` when `:verify_client_secret` is
+      # set (library default: `ClientSecret.verify/2`). Pass `nil` to disable.
       "grant_types_supported" => grant_types_supported(client_credentials?),
       "code_challenge_methods_supported" => ["S256"],
       "token_endpoint_auth_methods_supported" =>

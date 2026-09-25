@@ -244,6 +244,7 @@ defmodule AshAuthentication.Oauth2Server.SmokeTest do
                "authorization_code",
                "refresh_token"
              ]
+
       assert doc["code_challenge_methods_supported"] == ["S256"]
       assert doc["token_endpoint_auth_methods_supported"] == ["none"]
     end
