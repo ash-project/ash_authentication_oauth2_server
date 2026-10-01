@@ -6,13 +6,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
   @moduledoc """
   Protocol-pure logic for the `/oauth/token` endpoint.
 
-  Supports two grant types:
+  Supports three grant types:
 
     * `authorization_code` — with PKCE verification, redirect/resource
       binding checks, and one-shot consumption of the code.
     * `refresh_token` — with rotation and reuse detection per OAuth 2.1
       §4.3.1. A second use of an already-rotated refresh token revokes the
       entire descendant chain.
+    * `client_credentials` — machine-to-machine; confidential client
+      authenticates with a secret; access token only (no refresh token).
 
   All functions return tagged tuples; controllers translate them to HTTP.
 
@@ -28,21 +30,331 @@ defmodule AshAuthentication.Oauth2Server.Token do
   require Ash.Query
   require Logger
 
-  alias AshAuthentication.Oauth2Server.{CIMD, Jwt, PKCE}
+  alias AshAuthentication.Oauth2Server.{CIMD, ClientMetadata, Jwt, PKCE}
 
   @ash_context %{private: %{ash_authentication?: true}}
 
   @typedoc "Result of a successful grant — the bundle returned to the client."
   @type token_response :: %{
-          access_token: String.t(),
-          token_type: String.t(),
-          expires_in: pos_integer(),
-          refresh_token: String.t(),
-          scope: String.t()
+          :access_token => String.t(),
+          :token_type => String.t(),
+          :expires_in => pos_integer(),
+          :scope => String.t(),
+          optional(:refresh_token) => String.t()
         }
 
   @typedoc "Options shared across this module's public functions."
   @type opts :: [tenant: any()]
+
+  # ── client_credentials grant ───────────────────────────────────────────────
+
+  @doc """
+  Issue an access token for a confidential client (no user, no refresh token).
+
+  `params` must include credentials either as body fields or already merged
+  from HTTP Basic (`client_id` + `client_secret`). Prefer calling via the
+  protocol router, which uses `ClientAuth.credentials/2`.
+
+  Requires the server to configure `:verify_client_secret`. The client row
+  must list `client_credentials` in `grant_types` and must not use
+  `token_endpoint_auth_method: "none"`. Ineligible clients and bad secrets
+  both return `{:error, :invalid_client}` so callers cannot distinguish
+  grant eligibility from secret failure.
+
+  `token_endpoint_auth_method` of `client_secret_basic` or
+  `client_secret_post` both mean “confidential client with a secret”.
+  Either HTTP Basic **or** body credentials are accepted for those rows.
+  Dual Basic+body in one request remains `invalid_request` via
+  `ClientAuth`. The registered method is kept for metadata/interop but
+  is not bound to presentation on the wire.
+  """
+  @spec exchange_client_credentials(server :: module(), params :: map(), opts()) ::
+          {:ok, token_response()} | {:error, atom()}
+  def exchange_client_credentials(server, params, opts \\ [])
+
+  def exchange_client_credentials(server, params, opts) when is_map(params) do
+    tenant = Keyword.get(opts, :tenant)
+    secret_context = secret_context(tenant)
+
+    with {:ok, client_id, client_secret} <- client_credentials_from_params(params),
+         {:ok, client} <- get_client(server, client_id, client_secret, opts),
+         :ok <- ensure_client_credentials_allowed(client, client_secret),
+         :ok <- verify_secret(server, client, client_secret),
+         :ok <- check_resource_param(server, params, secret_context),
+         {:ok, scope} <- resolve_client_credentials_scope(server, client, params),
+         extra <- server.extra_access_token_claims(client, %{"scope" => scope}, opts),
+         {:ok, access_token, _claims} <-
+           Jwt.mint(server,
+             # Both from the stored row, never the presented value: the
+             # data layer may accept a non-canonical spelling of the id
+             # (e.g. an upper-case UUID) that would otherwise leak into
+             # the token and make `sub` and `client_id` disagree.
+             sub: client.id,
+             client_id: client.id,
+             scope: scope,
+             tenant: tenant,
+             grant_type: "client_credentials",
+             extra_claims: extra
+           ) do
+      touch_client(client, opts)
+
+      {:ok,
+       %{
+         access_token: access_token,
+         token_type: "Bearer",
+         expires_in: server.access_token_lifetime(),
+         scope: scope
+       }}
+    end
+  end
+
+  @doc """
+  Whether a client row is currently allowed to use `client_credentials`.
+
+  Used at token issue and again by `ClientBearerPlug` so removing the grant
+  (or switching the client to a public auth method) invalidates machine
+  access without waiting for JWT expiry.
+  """
+  @spec client_credentials_allowed?(Ash.Resource.record()) :: boolean()
+  def client_credentials_allowed?(client) do
+    ensure_client_credentials_allowed(client, nil) == :ok
+  end
+
+  @doc """
+  Whether a minted access-token scope string is still allowed for `client`
+  against the server's current catalogue and the client's allow-list.
+
+  Used by `ClientBearerPlug` so narrowing a client's scopes (or the
+  server catalogue) takes effect before JWT expiry.
+  """
+  @spec machine_scopes_allowed?(module(), Ash.Resource.record(), String.t()) :: boolean()
+  def machine_scopes_allowed?(server, client, scope) when is_binary(scope) do
+    token_scopes = scope |> String.split(" ", trim: true) |> MapSet.new()
+    client_scopes = client_scope_set(client)
+
+    with :ok <- reject_empty_scope(token_scopes),
+         :ok <- check_requested_against_catalogue(server, token_scopes) do
+      check_requested_against_client(token_scopes, client_scopes) == :ok
+    else
+      _ -> false
+    end
+  end
+
+  def machine_scopes_allowed?(_, _, _), do: false
+
+  defp client_credentials_from_params(%{"client_id" => id, "client_secret" => secret})
+       when is_binary(id) and id != "" and is_binary(secret) and secret != "" do
+    {:ok, id, secret}
+  end
+
+  defp client_credentials_from_params(_), do: {:error, :invalid_request}
+
+  defp get_client(server, client_id, secret, opts) do
+    case Ash.get(server.client_resource(), client_id, ash_opts(opts)) do
+      {:ok, client} ->
+        {:ok, client}
+
+      _ ->
+        # RFC 6819 / RFC 9700 — unknown clients should not fail faster than
+        # a failed secret check (client-id enumeration via timing).
+        burn_client_auth_time(secret)
+        {:error, :invalid_client}
+    end
+  end
+
+  # Collapse grant / public-client failures to `invalid_client` so callers
+  # cannot distinguish "unknown client", "wrong secret", and "not allowed
+  # this grant".
+  defp ensure_client_credentials_allowed(client, secret) do
+    grants = ClientMetadata.allowed_grant_types(client)
+
+    cond do
+      "client_credentials" not in grants ->
+        burn_client_auth_time(secret)
+        {:error, :invalid_client}
+
+      public_client?(client) ->
+        burn_client_auth_time(secret)
+        {:error, :invalid_client}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Approximate a failed constant-time secret compare so early rejects
+  # (unknown / ineligible client) are not obviously faster.
+  defp burn_client_auth_time(secret) when is_binary(secret) do
+    dummy = :crypto.hash(:sha256, "ash-authentication-oauth2-server-dummy")
+    presented = :crypto.hash(:sha256, secret)
+    _ = Plug.Crypto.secure_compare(dummy, presented)
+    :ok
+  end
+
+  defp burn_client_auth_time(_), do: burn_client_auth_time("")
+
+  # Presentation (Basic vs body) is intentionally *not* bound to
+  # `token_endpoint_auth_method`: any confidential secret method accepts
+  # either channel. See `exchange_client_credentials/3` moduledoc.
+  # Dual mechanisms in one request are rejected earlier by ClientAuth.
+
+  defp verify_secret(server, client, secret) do
+    case server.verify_client_secret(client, secret) do
+      true ->
+        :ok
+
+      false ->
+        {:error, :invalid_client}
+
+      {:error, :verify_client_secret_not_configured} ->
+        {:error, :verify_client_secret_not_configured}
+
+      other ->
+        raise ArgumentError,
+              "verify_client_secret must return a boolean, got: #{inspect(other)}"
+    end
+  end
+
+  # RFC 8707 — `resource` may appear once or repeatedly; each value MUST be
+  # an absolute URI without a fragment. This server has a single resource
+  # audience, so every value must canonicalize to `resource_url`. Failures
+  # use `invalid_target` (not `invalid_grant`).
+  defp check_resource_param(server, params, secret_context) do
+    expected = server.resource_url(secret_context)
+
+    case Map.fetch(params, "resource") do
+      :error ->
+        :ok
+
+      {:ok, value} ->
+        value
+        |> List.wrap()
+        |> Enum.reduce_while(:ok, fn res, :ok ->
+          case accept_resource(res, expected) do
+            :ok -> {:cont, :ok}
+            {:error, _} = err -> {:halt, err}
+          end
+        end)
+    end
+  end
+
+  defp accept_resource(res, expected) when is_binary(res) do
+    with :ok <- validate_resource_uri(res) do
+      if AshAuthentication.Oauth2Server.__normalize_url__(res) == expected,
+        do: :ok,
+        else: {:error, :invalid_target}
+    end
+  end
+
+  defp accept_resource(_, _), do: {:error, :invalid_target}
+
+  defp validate_resource_uri(res) when is_binary(res) and res != "" do
+    uri = URI.parse(res)
+
+    cond do
+      # Absolute URI required (RFC 8707 §2).
+      uri.scheme not in ["https", "http"] or is_nil(uri.host) or uri.host == "" ->
+        {:error, :invalid_target}
+
+      # Fragment MUST NOT be included.
+      not is_nil(uri.fragment) ->
+        {:error, :invalid_target}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_resource_uri(_), do: {:error, :invalid_target}
+
+  defp resolve_client_credentials_scope(server, client, params) do
+    client_scopes = client_scope_set(client)
+
+    with {:ok, requested} <- requested_scope_set(params, client_scopes),
+         :ok <- reject_empty_scope(requested),
+         :ok <- validate_scope_tokens(requested),
+         :ok <- check_requested_against_catalogue(server, requested),
+         :ok <- check_requested_against_client(requested, client_scopes) do
+      {:ok, requested |> MapSet.to_list() |> Enum.sort() |> Enum.join(" ")}
+    end
+  end
+
+  defp requested_scope_set(params, client_scopes) do
+    case Map.fetch(params, "scope") do
+      :error ->
+        {:ok, client_scopes}
+
+      {:ok, scope} when is_binary(scope) and scope != "" ->
+        {:ok, scope |> String.split(" ", trim: true) |> MapSet.new()}
+
+      {:ok, scope} when is_binary(scope) ->
+        {:ok, client_scopes}
+
+      {:ok, _} ->
+        # Repeated / non-string scope (RFC 6749 §5.2 invalid_request —
+        # "repeats a parameter" often surfaces as a list in parsers).
+        {:error, :invalid_request}
+    end
+  end
+
+  defp client_scope_set(client) do
+    client
+    |> Map.get(:scope)
+    |> List.wrap()
+    |> Enum.flat_map(fn
+      s when is_binary(s) -> String.split(s, " ", trim: true)
+      _ -> []
+    end)
+    |> MapSet.new()
+  end
+
+  defp reject_empty_scope(requested) do
+    if MapSet.size(requested) == 0, do: {:error, :invalid_scope}, else: :ok
+  end
+
+  # RFC 6749 §3.3 / OAuth 2.1 §1.4.1 — scope-token charset.
+  # scope-token = 1*( %x21 / %x23-5B / %x5D-7E )
+  defp validate_scope_tokens(requested) do
+    if Enum.all?(requested, &valid_scope_token?/1) do
+      :ok
+    else
+      {:error, :invalid_scope}
+    end
+  end
+
+  defp valid_scope_token?(token) when is_binary(token) and token != "" do
+    token
+    |> String.to_charlist()
+    |> Enum.all?(fn
+      c when c == 0x21 or (c >= 0x23 and c <= 0x5B) or (c >= 0x5D and c <= 0x7E) -> true
+      _ -> false
+    end)
+  end
+
+  defp valid_scope_token?(_), do: false
+
+  defp check_requested_against_catalogue(server, requested) do
+    if server.enforce_scopes?() do
+      allowed = MapSet.new(server.scopes())
+
+      case MapSet.difference(requested, allowed) |> MapSet.to_list() do
+        [] -> :ok
+        _ -> {:error, :invalid_scope}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp check_requested_against_client(requested, client_scopes) do
+    # Empty client scope means "no restriction beyond the server catalogue"
+    # — same idea as an unset client scope allow-list.
+    if MapSet.size(client_scopes) == 0 or MapSet.subset?(requested, client_scopes) do
+      :ok
+    else
+      {:error, :invalid_scope}
+    end
+  end
 
   # ── authorization_code grant ───────────────────────────────────────────────
 
@@ -60,10 +372,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
     with {:ok, presented_client_id, canonical_client_id} <-
            resolve_client_id(server, params, opts),
+         {:ok, authenticated} <- authenticate_client(server, canonical_client_id, params, opts),
+         :ok <- check_client_grant(authenticated, "authorization_code"),
          {:ok, code, client} <- consume_code(server, params, canonical_client_id, opts),
          :ok <- verify_pkce(code, params),
          :ok <- check_resource_match(server, params, code, secret_context),
          :ok <- check_redirect_match(params, code),
+         extra <-
+           server.extra_access_token_claims(code.user_id, %{"scope" => code.scope}, opts),
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
              # The claim carries the identifier the client authenticates
@@ -71,7 +387,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
              sub: code.user_id,
              client_id: presented_client_id,
              scope: code.scope,
-             tenant: tenant
+             tenant: tenant,
+             extra_claims: extra
            ),
          {:ok, refresh_token} <- issue_refresh_token(server, client.id, code, opts) do
       touch_client(client, opts)
@@ -89,6 +406,77 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp secret_context(nil), do: %{}
   defp secret_context(tenant), do: %{tenant: tenant}
+
+  # RFC 6749 §4.1.3 / §6 — a confidential client MUST authenticate on
+  # every token request, not only for `client_credentials`. Runs before the
+  # code is consumed / the refresh token rotated, so a caller without the
+  # secret cannot burn a legitimate client's grant.
+  defp authenticate_client(server, client_id, params, opts) do
+    with {:ok, client} <- get_client_or_invalid(server, client_id, opts),
+         :ok <- authenticate_loaded_client(server, client, params["client_secret"]) do
+      {:ok, client}
+    end
+  end
+
+  defp get_client_or_invalid(server, client_id, opts) do
+    case Ash.get(server.client_resource(), client_id, ash_opts(opts)) do
+      {:ok, client} -> {:ok, client}
+      _ -> {:error, :invalid_client}
+    end
+  end
+
+  defp authenticate_loaded_client(server, client, secret) do
+    if public_client?(client),
+      do: :ok,
+      else: authenticate_confidential_client(server, client, secret)
+  end
+
+  # RFC 6749 §5.2 unauthorized_client — the (authenticated) client isn't
+  # registered for this grant, e.g. a client_credentials-only machine
+  # client trying to redeem a code. Refresh tokens are issued alongside
+  # every authorization_code exchange, and clients registered with the
+  # RFC 7591 default grant_types (`["authorization_code"]`) rely on that,
+  # so the refresh_token grant is allowed when either grant is listed.
+  defp check_client_grant(client, "refresh_token") do
+    grants = ClientMetadata.allowed_grant_types(client)
+
+    if "refresh_token" in grants or "authorization_code" in grants,
+      do: :ok,
+      else: {:error, :unauthorized_client}
+  end
+
+  defp check_client_grant(client, grant) do
+    if grant in ClientMetadata.allowed_grant_types(client),
+      do: :ok,
+      else: {:error, :unauthorized_client}
+  end
+
+  # Any method other than `none` (including ones this server doesn't
+  # implement, e.g. `private_key_jwt`) requires a verified secret — fail
+  # closed rather than treating unknown methods as public.
+  defp authenticate_confidential_client(server, client, secret)
+       when is_binary(secret) and secret != "" do
+    case server.verify_client_secret(client, secret) do
+      true ->
+        :ok
+
+      {:error, :verify_client_secret_not_configured} ->
+        Logger.warning(
+          "Oauth2Server: confidential client #{inspect(client.id)} cannot authenticate " <>
+            "because :verify_client_secret is nil"
+        )
+
+        {:error, :invalid_client}
+
+      _ ->
+        {:error, :invalid_client}
+    end
+  end
+
+  defp authenticate_confidential_client(_server, _client, _secret), do: {:error, :invalid_client}
+
+  defp public_client?(client),
+    do: Map.get(client, :token_endpoint_auth_method) in [nil, "none"]
 
   # Map the presented `client_id` param to the id stored on codes /
   # refresh rows. Ordinary client_ids pass through unchanged; URL-shaped
@@ -207,7 +595,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
         opts
       )
       when is_binary(raw) do
-    with {:ok, presented_client_id, client_id} <- resolve_client_id(server, params, opts) do
+    with {:ok, presented_client_id, client_id} <- resolve_client_id(server, params, opts),
+         {:ok, authenticated} <- authenticate_client(server, client_id, params, opts),
+         :ok <- check_client_grant(authenticated, "refresh_token") do
       do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts)
     end
   end
@@ -320,7 +710,13 @@ defmodule AshAuthentication.Oauth2Server.Token do
              sub: old_row.user_id,
              client_id: presented_client_id,
              scope: old_row.scope,
-             tenant: tenant
+             tenant: tenant,
+             extra_claims:
+               server.extra_access_token_claims(
+                 old_row.user_id,
+                 %{"scope" => old_row.scope},
+                 opts
+               )
            ) do
       touch_client_by_id(server, old_row.client_id, opts)
 

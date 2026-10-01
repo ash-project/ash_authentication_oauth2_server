@@ -165,8 +165,8 @@ if Code.ensure_loaded?(Igniter) do
           Module.concat(app_module, Oauth2Server)
         end)
         |> Keyword.put_new_lazy(:secrets_module, fn ->
-          detect_secrets_module(igniter, options[:user]) ||
-            Module.concat(app_module, Secrets)
+          # Convention from `mix ash_authentication.install`.
+          Module.concat(app_module, Secrets)
         end)
         |> Keyword.update!(:accounts, &AshAuthentication.Igniter.maybe_parse_module/1)
         |> Keyword.update!(:user, &AshAuthentication.Igniter.maybe_parse_module/1)
@@ -174,13 +174,6 @@ if Code.ensure_loaded?(Igniter) do
         |> Keyword.update!(:secrets_module, &AshAuthentication.Igniter.maybe_parse_module/1)
 
       options
-    end
-
-    defp detect_secrets_module(_igniter, _user) do
-      # Best-effort: peek at the user resource's compile-time config. If we
-      # can't find it cleanly, the caller falls back to <App>.Secrets which
-      # is the convention `mix ash_authentication.install` produces.
-      nil
     end
 
     # ── resource generation ───────────────────────────────────────────────
@@ -223,6 +216,8 @@ if Code.ensure_loaded?(Igniter) do
         "token_endpoint_auth_method:string:public",
         "--attribute",
         "scope:string:public",
+        "--attribute",
+        "client_secret_hash:string:public",
         "--attribute",
         "cimd_url:string:public",
         "--attribute",

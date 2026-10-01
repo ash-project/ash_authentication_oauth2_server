@@ -110,7 +110,9 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
 
       # A resolve counts as a use, so the row is stamped and thus eligible
       # for TTL-based expunging rather than living forever.
-      reloaded = Ash.get!(OAuthClient, client.id, context: %{private: %{ash_authentication?: true}})
+      reloaded =
+        Ash.get!(OAuthClient, client.id, context: %{private: %{ash_authentication?: true}})
+
       refute is_nil(reloaded.last_used_at)
     end
 
@@ -200,7 +202,9 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
       assert {:ok, found} = CIMD.find_client(CimdServer, @client_id)
       assert found.id == client.id
 
-      reloaded = Ash.get!(OAuthClient, client.id, context: %{private: %{ash_authentication?: true}})
+      reloaded =
+        Ash.get!(OAuthClient, client.id, context: %{private: %{ash_authentication?: true}})
+
       assert DateTime.compare(reloaded.last_used_at, stale) == :gt
     end
 

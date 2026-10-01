@@ -22,8 +22,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
     body = %{"error" => code} |> maybe_put("error_description", description)
 
     conn
-    |> put_resp_header("content-type", "application/json")
+    # RFC 6749 §5.1/§5.2 examples use charset=UTF-8; media type itself is application/json.
+    |> put_resp_header("content-type", "application/json; charset=UTF-8")
+    # RFC 6749 §5.1 — MUST send Cache-Control: no-store and Pragma: no-cache.
     |> put_resp_header("cache-control", "no-store")
+    |> put_resp_header("pragma", "no-cache")
     |> send_resp(status, Jason.encode!(body))
     |> halt()
   end
@@ -52,8 +55,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
     body = %{"error" => code} |> maybe_put("error_description", description)
 
     conn
-    |> put_resp_header("content-type", "application/json")
+    # RFC 6749 §5.1/§5.2 examples use charset=UTF-8; media type itself is application/json.
+    |> put_resp_header("content-type", "application/json; charset=UTF-8")
+    # RFC 6749 §5.1 — MUST send Cache-Control: no-store and Pragma: no-cache.
     |> put_resp_header("cache-control", "no-store")
+    |> put_resp_header("pragma", "no-cache")
     |> put_resp_header("www-authenticate", challenge)
     |> send_resp(status, Jason.encode!(body))
     |> halt()
@@ -148,18 +154,56 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   @spec describe_token_error(atom()) :: {pos_integer(), String.t(), String.t()}
   def describe_token_error(reason) do
     case reason do
-      :reuse -> {400, "invalid_grant", "code or refresh token already used"}
-      :expired -> {400, "invalid_grant", "expired"}
-      :pkce -> {400, "invalid_grant", "PKCE verification failed"}
-      :resource_mismatch -> {400, "invalid_grant", "resource does not match"}
-      :redirect_mismatch -> {400, "invalid_grant", "redirect_uri mismatch"}
-      :invalid_code -> {400, "invalid_grant", "code not found or invalid"}
-      :invalid_refresh -> {400, "invalid_grant", "refresh token invalid"}
-      :revoked -> {400, "invalid_grant", "refresh token revoked"}
-      :client_mismatch -> {400, "invalid_grant", "client mismatch"}
-      :invalid_request -> {400, "invalid_request", "missing required parameters"}
-      :refresh_create_failed -> {500, "server_error", "could not issue refresh token"}
-      _ -> {400, "invalid_request", "request could not be processed"}
+      :reuse ->
+        {400, "invalid_grant", "code or refresh token already used"}
+
+      :expired ->
+        {400, "invalid_grant", "expired"}
+
+      :pkce ->
+        {400, "invalid_grant", "PKCE verification failed"}
+
+      :resource_mismatch ->
+        {400, "invalid_target", "requested resource is invalid"}
+
+      :invalid_target ->
+        {400, "invalid_target", "requested resource is invalid"}
+
+      :redirect_mismatch ->
+        {400, "invalid_grant", "redirect_uri mismatch"}
+
+      :invalid_code ->
+        {400, "invalid_grant", "code not found or invalid"}
+
+      :invalid_refresh ->
+        {400, "invalid_grant", "refresh token invalid"}
+
+      :revoked ->
+        {400, "invalid_grant", "refresh token revoked"}
+
+      :client_mismatch ->
+        {400, "invalid_grant", "client mismatch"}
+
+      :invalid_request ->
+        {400, "invalid_request", "missing required parameters"}
+
+      :invalid_client ->
+        {401, "invalid_client", "client authentication failed"}
+
+      :unauthorized_client ->
+        {400, "unauthorized_client", "client not allowed this grant"}
+
+      :invalid_scope ->
+        {400, "invalid_scope", "requested scope is invalid"}
+
+      :verify_client_secret_not_configured ->
+        {500, "server_error", "client_credentials is not configured on this server"}
+
+      :refresh_create_failed ->
+        {500, "server_error", "could not issue refresh token"}
+
+      _ ->
+        {400, "invalid_request", "request could not be processed"}
     end
   end
 

@@ -176,7 +176,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlugTest do
           {"error", "invalid_token"}
         ])
 
-      assert challenge == ~S|Bearer resource_metadata="https://victim\", scope=\"admin\"", error="invalid_token"|
+      assert challenge ==
+               ~S|Bearer resource_metadata="https://victim\", scope=\"admin\"", error="invalid_token"|
+
       refute challenge =~ ~s|scope="admin"|
     end
   end

@@ -21,7 +21,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   require Ash.Query
 
   alias AshAuthentication.Oauth2Server
-  alias AshAuthentication.Oauth2Server.CIMD
+  alias AshAuthentication.Oauth2Server.{CIMD, ClientMetadata}
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -83,6 +83,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     with :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
          {:ok, client} <- load_client(server, params, opts),
          :ok <- check_redirect_uri(params, client),
+         :ok <- check_grant_type(client),
          :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
          {:ok, resource} <- resolve_resource(server, params, secret_context),
          {:ok, code_challenge} <- require_present(params, "code_challenge"),
@@ -222,6 +223,18 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
   defp load_client(_server, _params, _opts),
     do: {:error, "invalid_request", "client_id required"}
+
+  # RFC 6749 §4.1.2.1 — a client not registered for the authorization_code
+  # grant (e.g. a client_credentials-only machine client) must not start a
+  # user-delegated flow. Checked after the redirect URI so the error can be
+  # returned to the client's (validated) redirect URI.
+  defp check_grant_type(client) do
+    if "authorization_code" in ClientMetadata.allowed_grant_types(client),
+      do: :ok,
+      else:
+        {:error, "unauthorized_client",
+         "client is not allowed to use the authorization_code grant"}
+  end
 
   # RFC 9700 §4.1 — exact byte-equal match. No normalization, no
   # default-port elision, no trailing-slash equivalence. The client MUST

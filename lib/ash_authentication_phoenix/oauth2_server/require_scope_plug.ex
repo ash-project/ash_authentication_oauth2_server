@@ -6,8 +6,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug do
   @moduledoc """
   Gate a pipeline on OAuth scopes, with spec-shaped errors.
 
-  Mount after `AshAuthentication.Phoenix.Oauth2Server.BearerPlug` — it
-  reads the verified claims that plug put in `conn.assigns.oauth_claims`:
+  Mount after `AshAuthentication.Phoenix.Oauth2Server.BearerPlug` or
+  `AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug` — it reads
+  the verified claims that plug put in `conn.assigns.oauth_claims`:
 
       pipeline :mcp_write do
         plug AshAuthentication.Phoenix.Oauth2Server.BearerPlug,
@@ -26,10 +27,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug do
   All missing-or-required scopes are emitted in a single challenge, per
   the spec's guidance against incremental challenges.
 
-  When there are no verified claims at all (the plug ran without
-  `BearerPlug`, or with `required?: false` and no token), it responds
-  `401` like `BearerPlug` would — authorization is required before scope
-  can be evaluated.
+  When there are no verified claims at all (the plug ran without a
+  bearer plug, or with `required?: false` and no token), it responds
+  `401` like the bearer plug would — authorization is required before
+  scope can be evaluated.
 
   ## Options
 

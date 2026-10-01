@@ -27,6 +27,9 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
 
   @signer_alg "HS256"
 
+  # Must never be overridden by `:extra_claims` / `:extra_access_token_claims`.
+  @reserved_claims ~w(iss sub aud client_id scope iat nbf exp jti tenant gty)
+
   @doc """
   Mint a new access token.
 
@@ -38,6 +41,15 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
       `"tenant"` claim so the resource server can re-set the Ash tenant
       on the conn via `BearerPlug`. Multi-tenant deployments need this;
       single-tenant deployments can ignore it.
+    * `:grant_type` — when present (and non-nil), baked into the token as
+      a `"gty"` claim. Only machine (`client_credentials`) tokens set it;
+      person-delegated tokens never carry `gty`. The bearer plugs use it
+      to tell the two apart instead of comparing ids.
+    * `:extra_claims` — map of additional string-keyed claims merged into
+      the token. Reserved claims (`iss`, `sub`, `aud`, `client_id`,
+      `scope`, `iat`, `nbf`, `exp`, `jti`, `tenant`, `gty`) in this map
+      are dropped so app callbacks cannot weaken binding or lifetimes, or
+      forge the token type.
   """
   @spec mint(server :: module(), keyword()) ::
           {:ok, String.t(), map()} | {:error, term()}
@@ -47,10 +59,11 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     scope = Keyword.fetch!(opts, :scope)
     ttl = Keyword.get(opts, :ttl, server.access_token_lifetime())
     tenant = opts[:tenant]
+    extra = opts |> Keyword.get(:extra_claims, %{}) |> Map.new()
     secret_context = secret_context(tenant)
     now = System.system_time(:second)
 
-    claims =
+    reserved =
       %{
         "iss" => server.issuer_url(secret_context),
         "sub" => to_string(sub),
@@ -63,6 +76,15 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
         "jti" => generate_jti()
       }
       |> maybe_put_tenant(tenant, server.user_resource())
+      |> maybe_put_grant_type(opts[:grant_type])
+
+    # Extras first, then reserved — reserved always wins; strip any attempt
+    # to override protocol claims via `:extra_access_token_claims`.
+    claims =
+      extra
+      |> stringify_keys()
+      |> Map.drop(@reserved_claims)
+      |> Map.merge(reserved)
 
     signer = Joken.Signer.create(@signer_alg, server.signing_secret(secret_context))
 
@@ -70,6 +92,18 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
       {:ok, token, _} -> {:ok, token, claims}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp maybe_put_grant_type(claims, nil), do: claims
+
+  defp maybe_put_grant_type(claims, grant_type) when is_binary(grant_type),
+    do: Map.put(claims, "gty", grant_type)
+
+  defp stringify_keys(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), v}
+      {k, v} when is_binary(k) -> {k, v}
+    end)
   end
 
   defp secret_context(nil), do: %{}

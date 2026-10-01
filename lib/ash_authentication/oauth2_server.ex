@@ -49,6 +49,8 @@ defmodule AshAuthentication.Oauth2Server do
   | `:cimd_fetch_options` | `[]` | Keyword options passed to the fetcher's `fetch/2` — see `AshAuthentication.Oauth2Server.CIMD.ReqFetcher` for the default fetcher's options. |
   | `:sign_in_path` | `nil` | Path to redirect unauthenticated `/oauth/authorize` requests to. When `nil`, returns 401. |
   | `:initial_access_token` | `nil` | When set, `POST /oauth/register` requires the request to present a matching `Authorization: Bearer …` token (RFC 7591 §3). When `nil` (default), dynamic client registration is open — see the trust-model note below. |
+  | `:verify_client_secret` | `{AshAuthentication.Oauth2Server.ClientSecret, :verify, []}` | MFA `{Mod, :fun, args}` or 2-arity fun `(client, secret) -> boolean` used by the `client_credentials` grant to check a confidential client's secret. The default verifies a SHA-256 digest on `client_secret_hash` — see `AshAuthentication.Oauth2Server.ClientSecret`. Override for KMS / etc., or set to `nil` to disable `client_credentials` (metadata omits the grant). |
+  | `:extra_access_token_claims` | `nil` | Optional MFA `{Mod, :fun, args}` or 3-arity fun `(client_or_nil, claims, opts) -> map` merged into minted access-token claims (string keys). Use for app tenancy claims on machine tokens. |
 
   ## Dynamic client registration
 
@@ -154,7 +156,9 @@ defmodule AshAuthentication.Oauth2Server do
       cimd_fetcher: AshAuthentication.Oauth2Server.CIMD.ReqFetcher,
       cimd_fetch_options: [],
       sign_in_path: nil,
-      initial_access_token: nil
+      initial_access_token: nil,
+      verify_client_secret: {AshAuthentication.Oauth2Server.ClientSecret, :verify, []},
+      extra_access_token_claims: nil
     ]
   end
 
@@ -244,6 +248,69 @@ defmodule AshAuthentication.Oauth2Server do
 
           spec ->
             Oauth2Server.__resolve_secret__!(spec, __MODULE__, [:initial_access_token])
+        end
+      end
+
+      @doc """
+      Verify a confidential client's presented secret.
+
+      Returns `true` / `false`, or `{:error, :verify_client_secret_not_configured}`
+      when `:verify_client_secret` was explicitly set to `nil` (grant disabled).
+      The library default is `AshAuthentication.Oauth2Server.ClientSecret.verify/2`.
+      """
+      def verify_client_secret(client, secret)
+          when is_binary(secret) do
+        case @oauth2_server_opts[:verify_client_secret] do
+          nil ->
+            {:error, :verify_client_secret_not_configured}
+
+          fun when is_function(fun, 2) ->
+            fun.(client, secret) == true
+
+          {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
+            apply(mod, fun, [client, secret | args]) == true
+
+          other ->
+            raise ArgumentError,
+                  "invalid :verify_client_secret on #{inspect(__MODULE__)}: #{inspect(other)}"
+        end
+      end
+
+      @doc """
+      Whether the `client_credentials` grant is usable on this server.
+
+      True when `:verify_client_secret` is set (the library default uses
+      `AshAuthentication.Oauth2Server.ClientSecret`). Discovery metadata only
+      advertises the grant when this returns true. Pass
+      `verify_client_secret: nil` to disable.
+      """
+      def client_credentials_enabled? do
+        @oauth2_server_opts[:verify_client_secret] != nil
+      end
+
+      @doc """
+      Optional extra JWT claims for an access token.
+
+      `principal` is the user id (person grants) or the client record
+      (`client_credentials`). Returns a map of string keys to merge into
+      the token claims. Reserved protocol claims (`iss`, `sub`, `aud`,
+      `client_id`, `scope`, `iat`, `nbf`, `exp`, `jti`, `tenant`) are
+      ignored if returned — only app-specific keys are kept.
+      """
+      def extra_access_token_claims(principal, claims, opts \\ []) do
+        case @oauth2_server_opts[:extra_access_token_claims] do
+          nil ->
+            %{}
+
+          fun when is_function(fun, 3) ->
+            fun.(principal, claims, opts) || %{}
+
+          {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
+            apply(mod, fun, [principal, claims, opts | args]) || %{}
+
+          other ->
+            raise ArgumentError,
+                  "invalid :extra_access_token_claims on #{inspect(__MODULE__)}: #{inspect(other)}"
         end
       end
 

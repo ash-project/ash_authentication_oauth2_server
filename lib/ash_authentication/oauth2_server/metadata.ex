@@ -27,6 +27,8 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
       "resource" => server.resource_url(context),
       "authorization_servers" => [server.issuer_url(context)],
       "scopes_supported" => server.scopes(),
+      # RFC 6750 / RFC 9700 — only the Authorization header method; query
+      # and form body bearer tokens are not accepted by the resource plugs.
       "bearer_methods_supported" => ["header"]
     }
   end
@@ -42,6 +44,7 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
   @spec authorization_server(server :: module(), context :: map()) :: map()
   def authorization_server(server, context \\ %{}) do
     issuer = server.issuer_url(context)
+    client_credentials? = server.client_credentials_enabled?()
 
     base = %{
       "issuer" => issuer,
@@ -49,9 +52,12 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
       "token_endpoint" => issuer <> "/oauth/token",
       "revocation_endpoint" => issuer <> "/oauth/revoke",
       "response_types_supported" => ["code"],
-      "grant_types_supported" => ["authorization_code", "refresh_token"],
+      # Only advertise `client_credentials` when `:verify_client_secret` is
+      # set (library default: `ClientSecret.verify/2`). Pass `nil` to disable.
+      "grant_types_supported" => grant_types_supported(client_credentials?),
       "code_challenge_methods_supported" => ["S256"],
-      "token_endpoint_auth_methods_supported" => ["none"],
+      "token_endpoint_auth_methods_supported" =>
+        token_endpoint_auth_methods_supported(client_credentials?),
       "scopes_supported" => server.scopes(),
       # RFC 9207 — we include `iss` in every authorization response, and
       # advertising that is a MUST once we do (RFC 9207 §2.3).
@@ -66,6 +72,20 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
     # back to DCR / pre-registration when it's absent).
     |> put_if(server.cimd_enabled?(), "client_id_metadata_document_supported", true)
   end
+
+  defp grant_types_supported(true),
+    do: ["authorization_code", "refresh_token", "client_credentials"]
+
+  defp grant_types_supported(false),
+    do: ["authorization_code", "refresh_token"]
+
+  # Secret-based token-endpoint auth is only meaningful once confidential
+  # clients (client_credentials) are configured on this server.
+  defp token_endpoint_auth_methods_supported(true),
+    do: ["none", "client_secret_basic", "client_secret_post"]
+
+  defp token_endpoint_auth_methods_supported(false),
+    do: ["none"]
 
   defp put_if(map, true, key, value), do: Map.put(map, key, value)
   defp put_if(map, false, _key, _value), do: map

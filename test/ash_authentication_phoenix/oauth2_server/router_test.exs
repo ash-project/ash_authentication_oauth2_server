@@ -22,6 +22,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
   alias Oauth2ServerTest.Server
 
   alias Oauth2ServerTest.{
+    ClientSecrets,
+    Domain,
     OAuthAuthorizationCode,
     OAuthClient,
     OAuthConsent,
@@ -31,7 +33,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
 
   @consent_opts ConsentRouter.init(oauth2_server: Server)
   @protocol_opts ProtocolRouter.init(oauth2_server: Server)
-
+  @machine_protocol_opts ProtocolRouter.init(oauth2_server: Oauth2ServerTest.MachineServer)
+  @machine_secret "super-secret-machine-credential"
   # A real Phoenix router wired through the public macro, so the `/oauth` and
   # `/.well-known` mounts exercise Phoenix's prefix-stripping `forward` exactly
   # as an application would.
@@ -413,6 +416,175 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert conn.status == 400
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "unsupported_grant_type"
+    end
+  end
+
+  describe "ProtocolRouter: POST /token (client_credentials grant)" do
+    defp call_machine_protocol(conn), do: ProtocolRouter.call(conn, @machine_protocol_opts)
+
+    defp create_machine_client(auth_method \\ "client_secret_post") do
+      OAuthClient
+      |> Ash.Changeset.for_create(:register_client_credentials, %{
+        client_name: "Router Machine",
+        redirect_uris: [],
+        grant_types: ["client_credentials"],
+        response_types: [],
+        token_endpoint_auth_method: auth_method,
+        scope: "my-scope",
+        client_secret_hash: ClientSecrets.hash(@machine_secret)
+      })
+      |> Ash.create!(domain: Domain, context: %{private: %{ash_authentication?: true}})
+    end
+
+    test "issues an access token with no-store cache headers" do
+      client = create_machine_client()
+
+      conn =
+        conn(:post, "/token", %{
+          "grant_type" => "client_credentials",
+          "client_id" => client.id,
+          "client_secret" => @machine_secret,
+          "scope" => "my-scope"
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_machine_protocol()
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+      assert get_resp_header(conn, "pragma") == ["no-cache"]
+      assert get_resp_header(conn, "content-type") == ["application/json; charset=UTF-8"]
+      body = Jason.decode!(conn.resp_body)
+      assert body["token_type"] == "Bearer"
+      assert is_binary(body["access_token"])
+      refute Map.has_key?(body, "refresh_token")
+      assert body["scope"] == "my-scope"
+    end
+
+    test "accepts HTTP Basic client authentication" do
+      client = create_machine_client("client_secret_basic")
+      basic = Base.encode64("#{client.id}:#{@machine_secret}")
+
+      conn =
+        conn(:post, "/token", %{"grant_type" => "client_credentials", "scope" => "my-scope"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> put_req_header("authorization", "Basic #{basic}")
+        |> call_machine_protocol()
+
+      assert conn.status == 200
+      assert is_binary(Jason.decode!(conn.resp_body)["access_token"])
+    end
+
+    test "accepts HTTP Basic when client is registered for client_secret_post" do
+      client = create_machine_client("client_secret_post")
+      basic = Base.encode64("#{client.id}:#{@machine_secret}")
+
+      conn =
+        conn(:post, "/token", %{"grant_type" => "client_credentials", "scope" => "my-scope"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> put_req_header("authorization", "Basic #{basic}")
+        |> call_machine_protocol()
+
+      assert conn.status == 200
+      assert is_binary(Jason.decode!(conn.resp_body)["access_token"])
+    end
+
+    test "accepts body credentials when client is registered for client_secret_basic" do
+      client = create_machine_client("client_secret_basic")
+
+      conn =
+        conn(:post, "/token", %{
+          "grant_type" => "client_credentials",
+          "client_id" => client.id,
+          "client_secret" => @machine_secret,
+          "scope" => "my-scope"
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_machine_protocol()
+
+      assert conn.status == 200
+      assert is_binary(Jason.decode!(conn.resp_body)["access_token"])
+    end
+
+    test "bad secret returns 401 invalid_client without WWW-Authenticate for body auth" do
+      client = create_machine_client()
+
+      conn =
+        conn(:post, "/token", %{
+          "grant_type" => "client_credentials",
+          "client_id" => client.id,
+          "client_secret" => "wrong"
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_machine_protocol()
+
+      assert conn.status == 401
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+      assert get_resp_header(conn, "www-authenticate") == []
+    end
+
+    test "bad secret with Basic sets WWW-Authenticate" do
+      client = create_machine_client("client_secret_basic")
+      basic = Base.encode64("#{client.id}:wrong")
+
+      conn =
+        conn(:post, "/token", %{"grant_type" => "client_credentials"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> put_req_header("authorization", "Basic #{basic}")
+        |> call_machine_protocol()
+
+      assert conn.status == 401
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+      assert get_resp_header(conn, "www-authenticate") == [~s|Basic realm="oauth"|]
+    end
+
+    test "returns unsupported_grant_type when client_credentials is not configured" do
+      conn =
+        conn(:post, "/token", %{
+          "grant_type" => "client_credentials",
+          "client_id" => Ash.UUIDv7.generate(),
+          "client_secret" => "anything"
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "unsupported_grant_type"
+    end
+
+    test "rejects JSON body on the token endpoint (RFC 6749 form-urlencoded)" do
+      client = create_machine_client()
+
+      conn =
+        conn(
+          :post,
+          "/token",
+          Jason.encode!(%{
+            "grant_type" => "client_credentials",
+            "client_id" => client.id,
+            "client_secret" => @machine_secret
+          })
+        )
+        |> put_req_header("content-type", "application/json")
+        |> call_machine_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    end
+
+    test "rejects client credentials in the query string (RFC 6749 §2.3.1)" do
+      client = create_machine_client()
+
+      conn =
+        conn(
+          :post,
+          "/token?client_id=#{client.id}&client_secret=#{URI.encode_www_form(@machine_secret)}",
+          %{"grant_type" => "client_credentials", "scope" => "my-scope"}
+        )
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_machine_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
     end
   end
 
