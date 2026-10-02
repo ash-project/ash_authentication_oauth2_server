@@ -29,6 +29,8 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
     TenantedUser
   }
 
+  require Ash.Query
+
   @tenant_a "org-alpha"
   @tenant_b "org-beta"
 
@@ -235,6 +237,86 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
 
       assert refresh_a2 != refresh_a
       assert {:ok, claims} = Jwt.verify(TenantedServer, at)
+      assert claims["tenant"] == @tenant_a
+    end
+
+    test "recovers the tenant from the code when the caller supplies none", %{user_a: user_a} do
+      client = register_client(@tenant_a)
+      redirect_uri = "https://chat.example.com/cb"
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          TenantedServer,
+          authorize_params(client, challenge, redirect_uri),
+          tenant: @tenant_a
+        )
+
+      code = Authorize.issue_code!(TenantedServer, user_a, validated, tenant: @tenant_a)
+
+      # No `tenant:` opt. An app whose tenants share a host has nothing to derive one from at
+      # `/token`: the request carries only the code. Before the grant supplied it, the refresh
+      # row could not be written at all, because its tenant attribute cannot be null.
+      assert {:ok, response} =
+               Token.exchange_authorization_code(
+                 TenantedServer,
+                 %{
+                   "code" => code.id,
+                   "client_id" => client.id,
+                   "redirect_uri" => redirect_uri,
+                   "code_verifier" => verifier
+                 }
+               )
+
+      assert {:ok, claims} = Jwt.verify(TenantedServer, response.access_token)
+      assert claims["tenant"] == @tenant_a
+
+      refresh_row =
+        TenantedOAuthRefreshToken
+        |> Ash.Query.filter(user_id == ^user_a.id)
+        |> Ash.read_one!(authorize?: false)
+
+      assert refresh_row.org_id == @tenant_a
+    end
+
+    test "recovers the tenant from the refresh row when the caller supplies none",
+         %{user_a: user_a} do
+      client = register_client(@tenant_a)
+      redirect_uri = "https://chat.example.com/cb"
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          TenantedServer,
+          authorize_params(client, challenge, redirect_uri),
+          tenant: @tenant_a
+        )
+
+      code = Authorize.issue_code!(TenantedServer, user_a, validated, tenant: @tenant_a)
+
+      {:ok, %{refresh_token: refresh}} =
+        Token.exchange_authorization_code(
+          TenantedServer,
+          %{
+            "code" => code.id,
+            "client_id" => client.id,
+            "redirect_uri" => redirect_uri,
+            "code_verifier" => verifier
+          },
+          tenant: @tenant_a
+        )
+
+      assert {:ok, %{access_token: rotated}} =
+               Token.exchange_refresh_token(
+                 TenantedServer,
+                 %{
+                   "refresh_token" => refresh,
+                   "client_id" => client.id,
+                   "resource" => TenantedServer.resource_url()
+                 }
+               )
+
+      assert {:ok, claims} = Jwt.verify(TenantedServer, rotated)
       assert claims["tenant"] == @tenant_a
     end
   end
