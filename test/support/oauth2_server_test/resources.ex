@@ -247,6 +247,8 @@ defmodule Oauth2ServerTest.Secrets do
   @impl AshAuthentication.Secret
   def secret_for([:issuer_url], _, _, _), do: {:ok, "https://app.example.com"}
   def secret_for([:resource_url], _, _, _), do: {:ok, "https://app.example.com/mcp"}
+  def secret_for([:resources, :mcp], _, _, _), do: {:ok, "https://app.example.com/mcp"}
+  def secret_for([:resources, :gql], _, _, _), do: {:ok, "https://app.example.com/gql"}
 
   def secret_for([:signing_secret], _, _, _),
     do: {:ok, "test-signing-secret-test-signing-secret"}
@@ -270,6 +272,29 @@ defmodule Oauth2ServerTest.Server do
     refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
     consent_resource: Oauth2ServerTest.OAuthConsent,
     scopes: ["mcp"],
+    dcr_enabled?: true
+end
+
+defmodule Oauth2ServerTest.MultiResourceServer do
+  @moduledoc """
+  Protects two resources on one host, `/mcp` and `/gql`, each with its own
+  scope.
+  """
+
+  use AshAuthentication.Oauth2Server,
+    otp_app: :ash_authentication_oauth2_server,
+    user_resource: Oauth2ServerTest.User,
+    issuer_url: {Oauth2ServerTest.Secrets, []},
+    resources: [
+      mcp: [url: {Oauth2ServerTest.Secrets, []}, scopes: ["mcp"]],
+      gql: [url: {Oauth2ServerTest.Secrets, []}, scopes: ["gql"]]
+    ],
+    signing_secret: {Oauth2ServerTest.Secrets, []},
+    client_resource: Oauth2ServerTest.OAuthClient,
+    authorization_code_resource: Oauth2ServerTest.OAuthAuthorizationCode,
+    refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
+    consent_resource: Oauth2ServerTest.OAuthConsent,
+    scopes: ["mcp", "gql"],
     dcr_enabled?: true
 end
 

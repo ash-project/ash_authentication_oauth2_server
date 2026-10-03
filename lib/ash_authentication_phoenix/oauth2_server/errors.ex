@@ -72,7 +72,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       |> Enum.reject(fn {_, v} -> is_nil(v) end)
       |> Enum.map_join(", ", fn {k, v} -> ~s|#{k}="#{escape_quoted(v)}"| end)
 
-    "Bearer " <> challenge
+    String.trim_trailing("Bearer " <> challenge)
   end
 
   # WWW-Authenticate quoted-string values: backslash-escape `"` and `\`.
@@ -95,7 +95,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   Options:
 
     * `:description` — human-readable `error_description`
-    * `:tenant` — forwarded to the server's `resource_url/1` resolution
+    * `:tenant` — forwarded to the server's `resource_url/2` resolution
+    * `:resource` — the name of the protected resource. Defaults to the only
+      configured resource.
   """
   # sobelow_skip ["XSS.SendResp"]
   @spec send_insufficient_scope(Plug.Conn.t(), module(), [String.t()] | String.t(), keyword()) ::
@@ -108,7 +110,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       bearer_challenge([
         {"error", "insufficient_scope"},
         {"scope", scope},
-        {"resource_metadata", resource_metadata_url(server, Keyword.get(opts, :tenant))},
+        {"resource_metadata",
+         resource_metadata_url(server, Keyword.get(opts, :tenant), Keyword.get(opts, :resource))},
         {"error_description", description}
       ])
 
@@ -125,25 +128,34 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   end
 
   @doc """
-  The URL of the protected-resource metadata document (RFC 9728) for this
-  server — the value of the `resource_metadata` parameter in
-  `WWW-Authenticate` challenges. PRM lives at the host root per RFC 9728,
-  so path/query are stripped from the configured resource URL.
-  """
-  @spec resource_metadata_url(module(), any()) :: String.t()
-  def resource_metadata_url(server, tenant \\ nil) do
-    context = if tenant, do: %{tenant: tenant}, else: %{}
+  The URL of the protected-resource metadata document (RFC 9728) for a
+  protected resource — the value of the `resource_metadata` parameter in
+  `WWW-Authenticate` challenges. Per RFC 9728 §3.1 the well-known suffix goes
+  between the host and the path of the resource identifier, so
+  `https://host/mcp` maps to `https://host/.well-known/oauth-protected-resource/mcp`.
 
-    server.resource_url(context)
-    |> URI.parse()
-    |> Map.merge(%{path: "/.well-known/oauth-protected-resource", query: nil, fragment: nil})
+  `resource` is the name of a configured resource, and defaults to the only
+  configured resource.
+  """
+  @spec resource_metadata_url(module(), any(), atom() | nil) :: String.t()
+  def resource_metadata_url(server, tenant \\ nil, resource \\ nil) do
+    context = if tenant, do: %{tenant: tenant}, else: %{}
+    uri = URI.parse(server.resource_url(resource, context))
+
+    %{uri | path: "/.well-known/oauth-protected-resource" <> resource_path(uri), fragment: nil}
     |> URI.to_string()
   end
+
+  defp resource_path(%URI{path: path}) when path in [nil, "/"], do: ""
+  defp resource_path(%URI{path: path}), do: path
 
   @doc """
   Translate a `:reason` atom returned from a core module into an
   `{http_status, error_code, description}` triple suitable for an OAuth
   error response.
+
+  A reason that is not listed here is a server fault, not a malformed
+  request, so it maps to `500`.
   """
   @spec describe_token_error(atom()) :: {pos_integer(), String.t(), String.t()}
   def describe_token_error(reason) do
@@ -151,15 +163,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       :reuse -> {400, "invalid_grant", "code or refresh token already used"}
       :expired -> {400, "invalid_grant", "expired"}
       :pkce -> {400, "invalid_grant", "PKCE verification failed"}
-      :resource_mismatch -> {400, "invalid_grant", "resource does not match"}
+      :resource_mismatch -> {400, "invalid_grant", "grant resource is not configured"}
+      :invalid_target -> {400, "invalid_target", "requested resource is not acceptable"}
       :redirect_mismatch -> {400, "invalid_grant", "redirect_uri mismatch"}
       :invalid_code -> {400, "invalid_grant", "code not found or invalid"}
       :invalid_refresh -> {400, "invalid_grant", "refresh token invalid"}
       :revoked -> {400, "invalid_grant", "refresh token revoked"}
       :client_mismatch -> {400, "invalid_grant", "client mismatch"}
+      :invalid_client -> {400, "invalid_client", "unknown client"}
+      :unsupported_client_authentication -> {400, "invalid_client", "public client"}
+      :unauthorized_client -> {400, "unauthorized_client", "grant type not registered"}
+      :invalid_scope -> {400, "invalid_scope", "requested scope exceeds the grant"}
       :invalid_request -> {400, "invalid_request", "missing required parameters"}
       :refresh_create_failed -> {500, "server_error", "could not issue refresh token"}
-      _ -> {400, "invalid_request", "request could not be processed"}
+      _ -> {500, "server_error", "request could not be processed"}
     end
   end
 

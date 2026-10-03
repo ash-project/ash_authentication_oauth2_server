@@ -37,19 +37,27 @@ defmodule AshAuthentication.Oauth2Server.Token do
           access_token: String.t(),
           token_type: String.t(),
           expires_in: pos_integer(),
-          refresh_token: String.t(),
+          refresh_token: String.t() | nil,
           scope: String.t()
         }
 
-  @typedoc "Options shared across this module's public functions."
-  @type opts :: [tenant: any()]
+  @typedoc """
+  Options shared across this module's public functions.
+
+    * `:tenant` — the Ash tenant.
+    * `:authorization_scheme` — the scheme of the request's `Authorization`
+      header, downcased (for example `"basic"`), or `nil` without one. The
+      server supports public clients only, so any client credentials make
+      the request fail (OAuth 2.1 §3.2.2).
+  """
+  @type opts :: [tenant: any(), authorization_scheme: String.t() | nil]
 
   # ── authorization_code grant ───────────────────────────────────────────────
 
   @doc """
   Exchange an authorization code (with PKCE verifier) for an access + refresh
-  token pair. Consumes the code atomically; a second call with the same code
-  returns `{:error, :reuse}`.
+  token pair. Consumes the code atomically once every check has passed; a
+  second call with the same code returns `{:error, :reuse}`.
   """
   @spec exchange_authorization_code(server :: module(), params :: map(), opts()) ::
           {:ok, token_response()}
@@ -58,12 +66,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
     tenant = Keyword.get(opts, :tenant)
     secret_context = secret_context(tenant)
 
-    with {:ok, presented_client_id, canonical_client_id} <-
-           resolve_client_id(server, params, opts),
-         {:ok, code, client} <- consume_code(server, params, canonical_client_id, opts),
+    with :ok <- check_no_client_credentials(params, opts),
+         :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
+         {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
+         :ok <- check_grant_type(client, "authorization_code"),
+         {:ok, code} <- load_code(server, params, client.id, opts),
          :ok <- verify_pkce(code, params),
-         :ok <- check_resource_match(server, params, code, secret_context),
          :ok <- check_redirect_match(params, code),
+         :ok <- check_resource_match(server, params, code, secret_context),
+         {:ok, code} <- consume_code(code, opts),
          {:ok, access_token, _claims} <-
            Jwt.mint(server,
              # The claim carries the identifier the client authenticates
@@ -71,9 +82,10 @@ defmodule AshAuthentication.Oauth2Server.Token do
              sub: code.user_id,
              client_id: presented_client_id,
              scope: code.scope,
+             resource: code.resource_uri,
              tenant: tenant
            ),
-         {:ok, refresh_token} <- issue_refresh_token(server, client.id, code, opts) do
+         {:ok, refresh_token} <- maybe_issue_refresh_token(server, client, code, opts) do
       touch_client(client, opts)
 
       {:ok,
@@ -90,46 +102,110 @@ defmodule AshAuthentication.Oauth2Server.Token do
   defp secret_context(nil), do: %{}
   defp secret_context(tenant), do: %{tenant: tenant}
 
+  # OAuth 2.1 §3.2: a parameter sent without a value counts as omitted. A
+  # missing required parameter is `invalid_request` (§3.2.4), checked before
+  # the client or the grant is looked up.
+  defp require_params(params, keys) do
+    if Enum.all?(keys, &present?(params[&1])), do: :ok, else: {:error, :invalid_request}
+  end
+
+  defp present?(value), do: is_binary(value) and value != ""
+
+  # A form body like `scope[x]=y`, or a JSON object, decodes to a map. That
+  # is a malformed parameter, `invalid_request` (OAuth 2.1 §3.2.4).
+  defp check_optional_string(params, key) do
+    if is_nil(params[key]) or is_binary(params[key]),
+      do: :ok,
+      else: {:error, :invalid_request}
+  end
+
+  # OAuth 2.1 §3.2.2: the server MUST authenticate a client that includes
+  # client authentication. Every client here is public
+  # (`token_endpoint_auth_method: "none"`), so there is nothing to check
+  # the credentials against, and any credentials are `invalid_client`. More
+  # than one mechanism is `invalid_request` (§3.2.4). An empty
+  # `client_secret` counts as omitted (§3.2), which keeps the
+  # `dcr_always_return_client_secret?` workaround working.
+  defp check_no_client_credentials(params, opts) do
+    mechanisms =
+      Enum.count(
+        [
+          Keyword.get(opts, :authorization_scheme) == "basic",
+          present?(params["client_secret"]),
+          present?(params["client_assertion"])
+        ],
+        & &1
+      )
+
+    case mechanisms do
+      0 -> :ok
+      1 -> {:error, :unsupported_client_authentication}
+      _ -> {:error, :invalid_request}
+    end
+  end
+
   # Map the presented `client_id` param to the id stored on codes /
   # refresh rows. Ordinary client_ids pass through unchanged; URL-shaped
   # ones (Client ID Metadata Documents) resolve to the client row that was
   # upserted at authorize time — a database lookup only, never a fetch.
-  # Returns `{:ok, presented, canonical}`.
+  # An unknown client is `invalid_client` (OAuth 2.1 §3.2.4), checked
+  # before the grant. Returns `{:ok, presented, client}`.
   defp resolve_client_id(server, %{"client_id" => "https://" <> _ = url}, opts) do
     with true <- server.cimd_enabled?(),
          {:ok, client} <- CIMD.find_client(server, url, opts) do
-      {:ok, url, client.id}
+      {:ok, url, client}
     else
-      _ -> {:error, :client_mismatch}
+      _ -> {:error, :invalid_client}
     end
   end
 
-  defp resolve_client_id(_server, %{"client_id" => client_id}, _opts)
+  defp resolve_client_id(server, %{"client_id" => client_id}, opts)
        when is_binary(client_id) and client_id != "" do
-    {:ok, client_id, client_id}
+    case Ash.get(server.client_resource(), client_id, ash_opts(opts)) do
+      {:ok, client} -> {:ok, client_id, client}
+      _ -> {:error, :invalid_client}
+    end
   end
 
   defp resolve_client_id(_server, _params, _opts), do: {:error, :invalid_request}
 
-  defp consume_code(server, %{"code" => code_id}, client_id, opts)
-       when is_binary(code_id) and is_binary(client_id) do
+  # OAuth 2.1 §3.2.4: a client may use only the grant types it registered.
+  # A client without registered grant types has the RFC 7591 §2 default,
+  # `authorization_code` alone.
+  defp check_grant_type(client, grant_type) do
+    if grant_type in client_grant_types(client), do: :ok, else: {:error, :unauthorized_client}
+  end
+
+  defp client_grant_types(%{grant_types: [_ | _] = grant_types}), do: grant_types
+  defp client_grant_types(_client), do: ["authorization_code"]
+
+  # A client that cannot use the refresh_token grant gets no refresh token.
+  defp maybe_issue_refresh_token(server, client, code, opts) do
+    if "refresh_token" in client_grant_types(client),
+      do: issue_refresh_token(server, client.id, code, opts),
+      else: {:ok, nil}
+  end
+
+  # A request that fails any check leaves the code unconsumed, so a client
+  # that sent a bad verifier or resource can retry with the same code.
+  defp load_code(server, %{"code" => code_id}, client_id, opts) do
     with {:ok, code} <-
            code_or_error(Ash.get(server.authorization_code_resource(), code_id, ash_opts(opts))),
          :ok <- check_client_match(code, client_id),
          :ok <- check_not_consumed(code),
-         :ok <- check_not_expired(code),
-         {:ok, code} <-
-           code
-           |> Ash.Changeset.for_update(:consume, %{})
-           |> Ash.update(ash_opts(opts))
-           |> code_or_error(),
-         {:ok, client} <-
-           code_or_error(Ash.get(server.client_resource(), code.client_id, ash_opts(opts))) do
-      {:ok, code, client}
+         :ok <- check_not_expired(code) do
+      {:ok, code}
     end
   end
 
-  defp consume_code(_, _, _, _), do: {:error, :invalid_request}
+  # `:consume` validates `consumed_at` atomically, so a concurrent request
+  # that consumed the code first makes this one fail.
+  defp consume_code(code, opts) do
+    code
+    |> Ash.Changeset.for_update(:consume, %{})
+    |> Ash.update(ash_opts(opts))
+    |> code_or_error()
+  end
 
   defp code_or_error({:ok, _} = ok), do: ok
   defp code_or_error({:error, _}), do: {:error, :invalid_code}
@@ -156,32 +232,31 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp verify_pkce(_, _), do: {:error, :pkce}
 
-  # `resource` is optional per RFC 8707 §2; if present it must match.
+  # `resource` is optional per RFC 8707 §2. A code bound to a resource that
+  # is no longer configured is a bad grant. A requested value other than the
+  # code's resource is `invalid_target`, which RFC 8707 §2 defines for this
+  # case.
   defp check_resource_match(server, params, code, secret_context) do
-    expected = server.resource_url(secret_context)
-
     cond do
-      code.resource_uri != expected ->
+      code.resource_uri not in resource_urls(server, secret_context) ->
         {:error, :resource_mismatch}
 
-      is_binary(params["resource"]) and params["resource"] != "" ->
-        if AshAuthentication.Oauth2Server.__normalize_url__(params["resource"]) == expected,
-          do: :ok,
-          else: {:error, :resource_mismatch}
+      not requested_resource_ok?(params["resource"], code.resource_uri) ->
+        {:error, :invalid_target}
 
       true ->
         :ok
     end
   end
 
-  # RFC 9700 §4.1 — exact match against the redirect URI bound to the
-  # code at issue time.
-  defp check_redirect_match(%{"redirect_uri" => uri}, %{redirect_uri: code_uri})
-       when is_binary(uri) and is_binary(code_uri) do
-    if uri == code_uri, do: :ok, else: {:error, :redirect_mismatch}
-  end
-
-  defp check_redirect_match(_, _), do: {:error, :redirect_mismatch}
+  # OAuth 2.1 §4.1.3 drops `redirect_uri` from the token request, because
+  # PKCE prevents code injection. §10.2 still requires an OAuth 2.0 client's
+  # value to match the one bound to the code, exactly (RFC 9700 §4.1).
+  defp check_redirect_match(%{"redirect_uri" => uri}, %{redirect_uri: uri}), do: :ok
+  defp check_redirect_match(%{"redirect_uri" => nil}, _), do: :ok
+  defp check_redirect_match(%{"redirect_uri" => ""}, _), do: :ok
+  defp check_redirect_match(%{"redirect_uri" => _}, _), do: {:error, :redirect_mismatch}
+  defp check_redirect_match(_, _), do: :ok
 
   # ── refresh_token grant ───────────────────────────────────────────────────
 
@@ -201,23 +276,21 @@ defmodule AshAuthentication.Oauth2Server.Token do
           {:ok, token_response()} | {:error, atom()}
   def exchange_refresh_token(server, params, opts \\ [])
 
-  def exchange_refresh_token(
-        server,
-        %{"refresh_token" => raw, "client_id" => _} = params,
-        opts
-      )
-      when is_binary(raw) do
-    with {:ok, presented_client_id, client_id} <- resolve_client_id(server, params, opts) do
-      do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts)
+  def exchange_refresh_token(server, params, opts) do
+    with :ok <- check_no_client_credentials(params, opts),
+         :ok <- require_params(params, ["client_id", "refresh_token"]),
+         :ok <- check_optional_string(params, "scope"),
+         {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
+         :ok <- check_grant_type(client, "refresh_token") do
+      raw = params["refresh_token"]
+      do_exchange_refresh_token(server, params, raw, presented_client_id, client.id, opts)
     end
   end
-
-  def exchange_refresh_token(_, _, _), do: {:error, :invalid_request}
 
   defp do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts) do
     hash = hash_refresh(raw)
     resource = Map.get(params, "resource")
-    expected_resource = server.resource_url(secret_context(Keyword.get(opts, :tenant)))
+    resource_urls = resource_urls(server, secret_context(Keyword.get(opts, :tenant)))
 
     # Allocate the new refresh row's identifiers upfront so the rotate
     # can atomically set `rotated_to_id = ^new_id` without a separate
@@ -225,28 +298,34 @@ defmodule AshAuthentication.Oauth2Server.Token do
     {new_raw, new_hash} = generate_refresh()
     new_id = Ash.UUIDv7.generate()
 
-    case atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
-      {:ok, old_row} ->
-        complete_rotation(server, old_row, presented_client_id, new_id, new_hash, new_raw, opts)
+    with {:ok, scope} <-
+           requested_scope(server, hash, params, client_id, resource_urls, resource, opts) do
+      new_refresh = {new_id, new_hash, new_raw}
 
-      :no_match ->
-        case disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
-          :reuse ->
-            revoke_chain_by_hash(server, hash, opts)
-            {:error, :reuse}
+      case atomic_rotate(server, hash, client_id, resource, resource_urls, new_id, opts) do
+        {:ok, old_row} ->
+          complete_rotation(server, old_row, scope, presented_client_id, new_refresh, opts)
 
-          other ->
-            {:error, other}
-        end
+        :no_match ->
+          case disambiguate_failure(server, hash, client_id, resource_urls, resource, opts) do
+            :reuse ->
+              revoke_chain_by_hash(server, hash, opts)
+              {:error, :reuse}
 
-      {:bulk_error, errors} ->
-        # The bulk update itself failed for a real reason (validation,
-        # constraint, DB connectivity, etc.). Log it for ops visibility,
-        # don't leak details to the caller, and skip the disambiguation
-        # read — we already know the operation didn't complete.
-        Logger.error("Oauth2Server: refresh-token bulk_update failed: " <> inspect(errors))
+            other ->
+              {:error, other}
+          end
 
-        {:error, :invalid_refresh}
+        {:bulk_error, errors} ->
+          # The bulk update itself failed for a real reason (validation,
+          # constraint, DB connectivity, etc.). Log it for ops visibility,
+          # don't leak details to the caller, and skip the disambiguation
+          # read — we already know the operation didn't complete. The
+          # refresh token may still be valid, so this is not `invalid_grant`.
+          Logger.error("Oauth2Server: refresh-token bulk_update failed: " <> inspect(errors))
+
+          {:error, :server_error}
+      end
     end
   end
 
@@ -261,14 +340,15 @@ defmodule AshAuthentication.Oauth2Server.Token do
   #     other invalid-grant cases.
   #   * `{:bulk_error, errors}` — the bulk update itself failed for a
   #     real reason (validation, constraint, etc.). The caller logs
-  #     and returns a generic invalid_refresh without disambiguating.
-  defp atomic_rotate(server, hash, client_id, resource, expected_resource, new_id, opts) do
-    if requested_resource_ok?(resource, expected_resource),
-      do: do_atomic_rotate(server, hash, client_id, expected_resource, new_id, opts),
-      else: :no_match
+  #     and returns a server error without disambiguating.
+  defp atomic_rotate(server, hash, client_id, resource, resource_urls, new_id, opts) do
+    case Enum.filter(resource_urls, &requested_resource_ok?(resource, &1)) do
+      [] -> :no_match
+      allowed -> do_atomic_rotate(server, hash, client_id, allowed, new_id, opts)
+    end
   end
 
-  defp do_atomic_rotate(server, hash, client_id, expected_resource, new_id, opts) do
+  defp do_atomic_rotate(server, hash, client_id, allowed_resources, new_id, opts) do
     now = DateTime.utc_now()
 
     bulk_opts =
@@ -279,7 +359,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
     |> Ash.Query.filter(
       token_hash == ^hash and
         client_id == ^client_id and
-        resource_uri == ^expected_resource and
+        resource_uri in ^allowed_resources and
         expires_at > ^now and
         is_nil(rotated_to_id) and
         is_nil(revoked_at)
@@ -292,8 +372,13 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
-  defp complete_rotation(server, old_row, presented_client_id, new_id, new_hash, new_raw, opts) do
+  # OAuth 2.1 §4.3.1: an omitted scope means the scope of the grant. The
+  # access token gets the requested scope, and the new refresh token keeps
+  # the scope of the grant (RFC 6749 §6).
+  defp complete_rotation(server, old_row, scope, presented_client_id, new_refresh, opts) do
+    {new_id, new_hash, new_raw} = new_refresh
     tenant = Keyword.get(opts, :tenant)
+    access_scope = scope || old_row.scope
 
     new_expires_at =
       DateTime.add(DateTime.utc_now(), server.refresh_token_lifetime(), :second)
@@ -319,7 +404,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
            Jwt.mint(server,
              sub: old_row.user_id,
              client_id: presented_client_id,
-             scope: old_row.scope,
+             scope: access_scope,
+             resource: old_row.resource_uri,
              tenant: tenant
            ) do
       touch_client_by_id(server, old_row.client_id, opts)
@@ -330,7 +416,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
          token_type: "Bearer",
          expires_in: server.access_token_lifetime(),
          refresh_token: new_raw,
-         scope: old_row.scope
+         scope: access_scope
        }}
     end
   end
@@ -340,29 +426,52 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # the chain-revoke decision (only `:reuse` triggers revocation).
   # We could do this with errors on the bulk_update's filter instead
   # but not all data layers support that
-  defp disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
+  defp disambiguate_failure(server, hash, client_id, resource_urls, resource, opts) do
     case find_refresh(server, hash, opts) do
-      {:ok, row} -> classify_row(row, client_id, expected_resource, resource)
+      {:ok, row} -> classify_row(row, client_id, resource_urls, resource) || :invalid_refresh
       {:error, _} -> :invalid_refresh
     end
   end
 
-  defp classify_row(row, client_id, expected_resource, resource) do
+  # A requested scope beyond the grant is `invalid_scope` (OAuth 2.1
+  # §4.3.1). The rotate filter cannot compare scopes, so a request with a
+  # scope reads the row first. Only a token that passes every other check
+  # gets the scope error. A failing token takes the rotate path, which
+  # reports its own error and detects reuse.
+  defp requested_scope(server, hash, params, client_id, resource_urls, resource, opts) do
+    requested = String.split(params["scope"] || "", " ", trim: true)
+
+    with [_ | _] <- requested,
+         {:ok, row} <- find_refresh(server, hash, opts),
+         nil <- classify_row(row, client_id, resource_urls, resource) do
+      granted = String.split(row.scope, " ", trim: true)
+
+      if Enum.all?(requested, &(&1 in granted)),
+        do: {:ok, Enum.join(requested, " ")},
+        else: {:error, :invalid_scope}
+    else
+      _ -> {:ok, nil}
+    end
+  end
+
+  # The token's own state comes first. A rotated token is a replay no matter
+  # which client or resource the request names, so it must reach `:reuse`
+  # and revoke the chain (OAuth 2.1 §4.3.1). A dead token is `invalid_grant`
+  # even when the requested resource is also wrong.
+  defp classify_row(row, client_id, resource_urls, resource) do
     cond do
-      row.client_id != client_id -> :client_mismatch
-      row.resource_uri != expected_resource -> :resource_mismatch
-      not requested_resource_ok?(resource, expected_resource) -> :resource_mismatch
       row.revoked_at -> :revoked
       row.rotated_to_id -> :reuse
       DateTime.compare(DateTime.utc_now(), row.expires_at) == :gt -> :expired
-      true -> :invalid_refresh
+      row.client_id != client_id -> :client_mismatch
+      row.resource_uri not in resource_urls -> :resource_mismatch
+      not requested_resource_ok?(resource, row.resource_uri) -> :invalid_target
+      true -> nil
     end
   end
 
   @doc """
-  Revoke a token per RFC 7009. Always returns `:ok` regardless of whether the
-  token existed, was already revoked, or belonged to a different client — the
-  RFC requires the endpoint not to leak token state.
+  Revoke a token per RFC 7009.
 
   Only refresh tokens are revocable here: access tokens are stateless JWTs.
   When a refresh token is revoked, the entire descendant chain (rotated-to
@@ -373,30 +482,46 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
     * `"token"` (required) — the raw token string the client wishes to revoke.
     * `"client_id"` (required) — the public client identifier.
-    * `"token_type_hint"` (optional) — `"refresh_token"` or `"access_token"`.
-      Treated as a hint only; access-token revocation is a silent no-op.
+    * `"token_type_hint"` (optional) — ignored, because the server detects
+      the token type itself (RFC 7009 §2.1).
+
+  Returns:
+
+    * `:ok` — the token is revoked, or it is not a valid token (RFC 7009
+      §2.2).
+    * `{:error, :invalid_request}` — `token` or `client_id` is missing.
+    * `{:error, :invalid_client}` — the client is unknown.
+    * `{:error, :client_mismatch}` — the refresh token was issued to another
+      client. RFC 7009 §2.1 refuses the request.
+    * `{:error, :unsupported_token_type}` — the token is a valid access
+      token, which this server cannot revoke (RFC 7009 §2.2.1).
+    * `{:error, :server_error}` — the revocation did not complete. The
+      client must assume that the token is still valid (RFC 7009 §2.2.1).
   """
-  @spec revoke(server :: module(), params :: map(), opts()) :: :ok
-  def revoke(server, params, opts \\ [])
+  @spec revoke(server :: module(), params :: map(), opts()) :: :ok | {:error, atom()}
+  def revoke(server, params, opts \\ []) do
+    with :ok <- check_no_client_credentials(params, opts),
+         :ok <- require_params(params, ["client_id", "token"]),
+         {:ok, _presented, %{id: client_id}} <- resolve_client_id(server, params, opts) do
+      token = params["token"]
 
-  def revoke(server, %{"token" => raw, "client_id" => presented} = params, opts)
-      when is_binary(raw) and raw != "" and is_binary(presented) and presented != "" do
-    hash = hash_refresh(raw)
-
-    with {:ok, _presented, client_id} <- resolve_client_id(server, params, opts),
-         {:ok, %{client_id: ^client_id} = row} <- find_refresh(server, hash, opts) do
-      revoke_chain_by_id(server, row.chain_id, opts)
-    else
-      # RFC 7009 §2.2 — never leak whether the token (or client) existed.
-      _ -> :ok
+      server.refresh_token_resource()
+      |> Ash.Query.filter(token_hash == ^hash_refresh(token))
+      |> Ash.read_one(ash_opts(opts))
+      |> case do
+        {:ok, %{client_id: ^client_id} = row} -> revoke_chain_by_id(server, row.chain_id, opts)
+        {:ok, nil} -> revoke_access_token(server, token)
+        {:ok, _row} -> {:error, :client_mismatch}
+        {:error, _} -> {:error, :server_error}
+      end
     end
-
-    :ok
-  rescue
-    _ -> :ok
   end
 
-  def revoke(_server, _params, _opts), do: :ok
+  defp revoke_access_token(server, token) do
+    if Enum.any?(server.resources(), &match?({:ok, _}, Jwt.verify(server, token, resource: &1))),
+      do: {:error, :unsupported_token_type},
+      else: :ok
+  end
 
   defp find_refresh(server, hash, opts) do
     server.refresh_token_resource()
@@ -411,7 +536,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   # `resource` is optional per RFC 8707 §2 — when absent (`nil` or empty
   # string) we don't enforce, otherwise it must canonicalize to the
-  # server's resource URL.
+  # resource the grant is bound to.
   defp requested_resource_ok?(nil, _expected), do: true
   defp requested_resource_ok?("", _expected), do: true
 
@@ -420,6 +545,9 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   defp requested_resource_ok?(_, _), do: false
+
+  defp resource_urls(server, secret_context),
+    do: Enum.map(server.resources(), &server.resource_url(&1, secret_context))
 
   # On reuse detection, revoke every refresh token in the chain in a
   # single filtered UPDATE. RFC 6749 §4.3.1. Every row in a rotation
@@ -457,7 +585,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
             "ended with status #{inspect(status)}: #{inspect(errors)}"
         )
 
-        :ok
+        {:error, :server_error}
     end
   end
 

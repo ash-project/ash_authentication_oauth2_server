@@ -20,6 +20,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   ## Options
 
     * `:oauth2_server` (required) — your `Oauth2Server` config module
+    * `:resource` — the name of the protected resource that this plug
+      guards. The plug accepts only tokens whose `aud` names this resource,
+      and its challenges point at this resource's metadata. Required when the
+      server configures more than one resource.
     * `:required?` (default `true`) — when `false`, missing/invalid tokens
       pass through unchanged instead of returning 401. Useful for routes
       that should serve unauthenticated users with a different (e.g.
@@ -114,8 +118,13 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   @impl Plug
   def init(opts) do
+    server = Keyword.fetch!(opts, :oauth2_server)
+    resource = Keyword.get(opts, :resource)
+    AshAuthentication.Oauth2Server.__check_resource_option__!(server, resource)
+
     %{
-      server: Keyword.fetch!(opts, :oauth2_server),
+      server: server,
+      resource: resource,
       required?: Keyword.get(opts, :required?, true),
       scope: opts |> Keyword.get(:scope) |> normalize_scope()
     }
@@ -125,16 +134,22 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   defp normalize_scope(scope), do: scope |> List.wrap() |> Enum.join(" ")
 
   @impl Plug
-  def call(conn, %{server: server, required?: required?, scope: scope}) do
+  def call(conn, %{server: server, resource: resource, required?: required?, scope: scope}) do
     case extract_token(conn) do
       :no_token when required? ->
-        challenge(conn, server, nil, scope)
+        challenge(conn, server, resource, nil, scope)
 
       :no_token ->
         conn
 
+      :malformed when required? ->
+        challenge(conn, server, resource, :malformed, scope)
+
+      :malformed ->
+        conn
+
       {:ok, token} ->
-        case verify_and_load(server, token) do
+        case verify_and_load(server, resource, token) do
           {:ok, user, claims} ->
             conn
             |> maybe_set_tenant(claims)
@@ -142,7 +157,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
             |> assign(:oauth_claims, claims)
 
           {:error, reason} when required? ->
-            challenge(conn, server, reason, scope)
+            challenge(conn, server, resource, reason, scope)
 
           {:error, _} ->
             conn
@@ -160,16 +175,29 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   defp maybe_set_tenant(conn, _), do: conn
 
-  defp extract_token(conn) do
-    case get_req_header(conn, "authorization") do
-      ["Bearer " <> token | _] when token != "" -> {:ok, token}
-      ["bearer " <> token | _] when token != "" -> {:ok, token}
+  defp extract_token(conn), do: __parse_bearer__(conn)
+
+  @doc false
+  # RFC 7235 §2.1: the auth-scheme is case-insensitive. RFC 6750 §2.1: one
+  # or more spaces separate it from the token. A Bearer header without a
+  # token is a malformed request (RFC 6750 §3.1). Another scheme is no
+  # Bearer authentication at all.
+  @spec __parse_bearer__(Plug.Conn.t()) :: {:ok, String.t()} | :no_token | :malformed
+  def __parse_bearer__(conn) do
+    with [header | _] <- get_req_header(conn, "authorization"),
+         [scheme | rest] <- String.split(header, " ", parts: 2),
+         "bearer" <- String.downcase(scheme) do
+      case rest |> List.first("") |> String.trim_leading(" ") do
+        "" -> :malformed
+        token -> {:ok, token}
+      end
+    else
       _ -> :no_token
     end
   end
 
-  defp verify_and_load(server, token) do
-    with {:ok, claims} <- Jwt.verify(server, token),
+  defp verify_and_load(server, resource, token) do
+    with {:ok, claims} <- Jwt.verify(server, token, resource: resource),
          {:ok, user} <- load_user(server, claims) do
       {:ok, user, claims}
     end
@@ -193,8 +221,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
   defp maybe_put_tenant_opt(opts, _), do: opts
 
-  defp challenge(conn, server, reason, scope) do
-    metadata_url = Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn))
+  defp challenge(conn, server, resource, reason, scope) do
+    status = if reason == :malformed, do: 400, else: 401
+
+    metadata_url =
+      Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn), resource)
+
     {error, error_description} = error_params(reason)
 
     challenge =
@@ -207,13 +239,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
     conn
     |> put_resp_header("www-authenticate", challenge)
-    |> send_resp(401, "")
+    |> send_resp(status, "")
     |> halt()
   end
 
   defp error_params(reason) do
     case reason do
       nil -> {nil, nil}
+      :malformed -> {"invalid_request", "Bearer credentials without a token"}
       :invalid_audience -> {"invalid_token", "audience mismatch"}
       :invalid_issuer -> {"invalid_token", "issuer mismatch"}
       :expired -> {"invalid_token", "token expired"}

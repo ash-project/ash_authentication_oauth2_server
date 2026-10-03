@@ -16,9 +16,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
   import Plug.Test
   import Plug.Conn
 
-  alias AshAuthentication.Oauth2Server.{Jwt, PKCE}
+  require Ash.Query
 
-  alias AshAuthentication.Phoenix.Oauth2Server.{ConsentRouter, ProtocolRouter}
+  alias AshAuthentication.Oauth2Server.{Authorize, Jwt, PKCE, Token}
+
+  alias AshAuthentication.Phoenix.Oauth2Server.{ConsentRouter, Errors, ProtocolRouter}
   alias Oauth2ServerTest.Server
 
   alias Oauth2ServerTest.{
@@ -71,7 +73,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       "/register",
       Jason.encode!(%{
         "client_name" => "Test",
-        "redirect_uris" => [redirect_uri]
+        "redirect_uris" => [redirect_uri],
+        "grant_types" => ["authorization_code", "refresh_token"]
       })
     )
     |> put_req_header("content-type", "application/json")
@@ -120,7 +123,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       for path <- [
             "/.well-known/oauth-authorization-server",
             "/.well-known/openid-configuration",
-            "/.well-known/oauth-protected-resource"
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp"
           ] do
         conn = call_router(conn(:get, path))
         assert conn.status == 200, "expected 200 for #{path}, got #{conn.status}"
@@ -230,6 +234,25 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert body["error"] == "invalid_token"
     end
 
+    test "401 without an error code when the initial access token is missing (RFC 6750 §3.1)" do
+      opts = ProtocolRouter.init(oauth2_server: Oauth2ServerTest.GatedServer)
+
+      conn =
+        conn(
+          :post,
+          "/register",
+          Jason.encode!(%{
+            "client_name" => "X",
+            "redirect_uris" => ["https://app.example.com/cb"]
+          })
+        )
+        |> put_req_header("content-type", "application/json")
+        |> ProtocolRouter.call(opts)
+
+      assert conn.status == 401
+      assert get_resp_header(conn, "www-authenticate") == ["Bearer"]
+    end
+
     test "accepts a registration with the correct initial access token" do
       opts =
         ProtocolRouter.init(oauth2_server: Oauth2ServerTest.GatedServer)
@@ -297,6 +320,145 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert ["text/html; charset=utf-8"] = get_resp_header(conn, "content-type")
       assert conn.resp_body =~ "Authorize"
       assert conn.resp_body =~ "Approve"
+    end
+  end
+
+  describe "ConsentRouter: authorize errors" do
+    test "redirects an error only to the exact registered redirect_uri", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_v, challenge} = pkce()
+
+      query =
+        client_id
+        |> authorize_query(redirect_uri, challenge)
+        |> Map.put("response_type", "token")
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(query))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri <> "?")
+      params = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert params["error"] == "unsupported_response_type"
+
+      # Equivalent after normalization, but not the registered string.
+      conn =
+        conn(
+          :get,
+          "/?" <> URI.encode_query(%{query | "redirect_uri" => "HTTPS://CHAT.EXAMPLE.COM/cb"})
+        )
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 400
+      assert get_resp_header(conn, "location") == []
+    end
+
+    test "accepts a request without state and omits state from the redirect (OAuth 2.1 §4.1.1)",
+         %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_v, challenge} = pkce()
+
+      OAuthConsent
+      |> Ash.Changeset.for_create(:grant, %{user_id: user.id, client_id: client_id, scope: "mcp"})
+      |> Ash.create!()
+
+      query = client_id |> authorize_query(redirect_uri, challenge) |> Map.delete("state")
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(query))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      params = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert is_binary(params["code"])
+      refute Map.has_key?(params, "state")
+    end
+
+    test "redirects an error to the only registered redirect_uri when it is omitted",
+         %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_v, challenge} = pkce()
+
+      query =
+        client_id
+        |> authorize_query(redirect_uri, challenge)
+        |> Map.delete("redirect_uri")
+        |> Map.put("response_type", "token")
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(query))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri <> "?")
+    end
+
+    test "keeps the redirect_uri as registered when adding parameters (OAuth 2.1 §2.3)",
+         %{user: user} do
+      for {registered, prefix} <- [
+            {"https://chat.example.com/cb?app=1", "https://chat.example.com/cb?app=1&"},
+            {"https://chat.example.com/cb?", "https://chat.example.com/cb?"},
+            {"https://chat.example.com:443/cb?app=1", "https://chat.example.com:443/cb?app=1&"}
+          ] do
+        {client_id, redirect_uri} = create_client_for_authorize(registered)
+        {_v, challenge} = pkce()
+
+        OAuthConsent
+        |> Ash.Changeset.for_create(:grant, %{
+          user_id: user.id,
+          client_id: client_id,
+          scope: "mcp"
+        })
+        |> Ash.create!()
+
+        conn =
+          conn(
+            :get,
+            "/?" <> URI.encode_query(authorize_query(client_id, redirect_uri, challenge))
+          )
+          |> Ash.PlugHelpers.set_actor(user)
+          |> call_consent()
+
+        [code] =
+          OAuthAuthorizationCode
+          |> Ash.Query.filter(client_id == ^client_id)
+          |> Ash.read!(context: %{private: %{ash_authentication?: true}})
+
+        assert conn.status == 302
+
+        assert get_resp_header(conn, "location") == [
+                 prefix <>
+                   URI.encode_query(%{
+                     "code" => code.id,
+                     "iss" => Server.issuer_url(),
+                     "state" => "csrf-state"
+                   })
+               ]
+      end
+    end
+
+    test "never redirects an unknown client", %{user: user} do
+      {_v, challenge} = pkce()
+
+      query =
+        authorize_query(Ash.UUIDv7.generate(), "https://chat.example.com/cb", challenge)
+
+      conn =
+        conn(:get, "/?" <> URI.encode_query(query))
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      assert conn.status == 400
+      assert get_resp_header(conn, "location") == []
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
     end
   end
 
@@ -404,6 +566,75 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert claims["sub"] == user.id
     end
 
+    test "an unacceptable resource returns 400 + invalid_target (RFC 8707 §2)", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {verifier, challenge} = pkce()
+
+      consent_request = obtain_consent_request(user, client_id, redirect_uri, challenge)
+
+      authorize_conn =
+        conn(:post, "/", %{"consent_request" => consent_request, "action" => "approve"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_consent()
+
+      [location] = get_resp_header(authorize_conn, "location")
+      query = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+      token_conn =
+        conn(:post, "/token", %{
+          "grant_type" => "authorization_code",
+          "code" => query["code"],
+          "redirect_uri" => redirect_uri,
+          "code_verifier" => verifier,
+          "client_id" => client_id,
+          "resource" => "https://other.example.com/api"
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_protocol()
+
+      assert token_conn.status == 400
+      assert Jason.decode!(token_conn.resp_body)["error"] == "invalid_target"
+    end
+
+    test "a refresh by a client without the refresh_token grant is unauthorized_client" do
+      conn =
+        conn(
+          :post,
+          "/register",
+          Jason.encode!(%{
+            "client_name" => "X",
+            "redirect_uris" => ["https://chat.example.com/cb"]
+          })
+        )
+        |> put_req_header("content-type", "application/json")
+        |> call_protocol()
+
+      client_id = Jason.decode!(conn.resp_body)["client_id"]
+
+      conn =
+        conn(:post, "/token", %{
+          "grant_type" => "refresh_token",
+          "refresh_token" => "any",
+          "client_id" => client_id
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "unauthorized_client"
+    end
+
+    test "a missing grant_type returns 400 + invalid_request" do
+      conn =
+        conn(:post, "/token", %{"client_id" => "x"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    end
+
     test "unsupported grant_type returns 400 + RFC code" do
       conn =
         conn(:post, "/token", %{"grant_type" => "password"})
@@ -413,6 +644,170 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert conn.status == 400
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "unsupported_grant_type"
+    end
+  end
+
+  describe "ProtocolRouter: POST /revoke (RFC 7009)" do
+    defp issue_tokens(user, client_id) do
+      {verifier, challenge} = pkce()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_query(client_id, "https://chat.example.com/cb", challenge)
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      {:ok, tokens} =
+        Token.exchange_authorization_code(Server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "code_verifier" => verifier,
+          "client_id" => client_id
+        })
+
+      tokens
+    end
+
+    defp revoke(params) do
+      conn(:post, "/revoke", params)
+      |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> call_protocol()
+    end
+
+    defp error_of(conn), do: Jason.decode!(conn.resp_body)["error"]
+
+    test "revokes the client's own refresh token", %{user: user} do
+      {client_id, _} = create_client_for_authorize()
+      tokens = issue_tokens(user, client_id)
+
+      assert revoke(%{"token" => tokens.refresh_token, "client_id" => client_id}).status == 200
+
+      assert {:error, :revoked} =
+               Token.exchange_refresh_token(Server, %{
+                 "refresh_token" => tokens.refresh_token,
+                 "client_id" => client_id
+               })
+    end
+
+    test "answers 200 for a token that is not valid (§2.2)" do
+      {client_id, _} = create_client_for_authorize()
+      assert revoke(%{"token" => "not-a-token", "client_id" => client_id}).status == 200
+    end
+
+    test "rejects a request without token or client_id with invalid_request" do
+      {client_id, _} = create_client_for_authorize()
+
+      for params <- [%{"client_id" => client_id}, %{"token" => "x"}] do
+        conn = revoke(params)
+        assert conn.status == 400
+        assert error_of(conn) == "invalid_request"
+      end
+    end
+
+    test "rejects an unknown client with invalid_client" do
+      conn = revoke(%{"token" => "x", "client_id" => Ash.UUIDv7.generate()})
+      assert conn.status == 400
+      assert error_of(conn) == "invalid_client"
+    end
+
+    test "refuses a refresh token of another client (§2.1)", %{user: user} do
+      {client_id, _} = create_client_for_authorize()
+      {other_client_id, _} = create_client_for_authorize()
+      tokens = issue_tokens(user, client_id)
+
+      conn = revoke(%{"token" => tokens.refresh_token, "client_id" => other_client_id})
+      assert conn.status == 400
+      assert error_of(conn) == "invalid_grant"
+
+      assert {:ok, _} =
+               Token.exchange_refresh_token(Server, %{
+                 "refresh_token" => tokens.refresh_token,
+                 "client_id" => client_id
+               })
+    end
+
+    test "answers unsupported_token_type for an access token (§2.2.1)", %{user: user} do
+      {client_id, _} = create_client_for_authorize()
+      tokens = issue_tokens(user, client_id)
+
+      conn = revoke(%{"token" => tokens.access_token, "client_id" => client_id})
+      assert conn.status == 400
+      assert error_of(conn) == "unsupported_token_type"
+    end
+  end
+
+  describe "client authentication of public clients (OAuth 2.1 §3.2.2)" do
+    defp post_form(path, params, headers \\ []) do
+      Enum.reduce(
+        headers,
+        conn(:post, path, params)
+        |> put_req_header("content-type", "application/x-www-form-urlencoded"),
+        fn {k, v}, conn -> put_req_header(conn, k, v) end
+      )
+      |> call_protocol()
+    end
+
+    defp refresh_params(client_id, extra \\ %{}) do
+      Map.merge(
+        %{"grant_type" => "refresh_token", "refresh_token" => "bogus", "client_id" => client_id},
+        extra
+      )
+    end
+
+    test "an empty client_secret counts as omitted" do
+      {client_id, _} = create_client_for_authorize()
+      conn = post_form("/token", refresh_params(client_id, %{"client_secret" => ""}))
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_grant"
+    end
+
+    test "a client_secret or client_assertion is invalid_client" do
+      {client_id, _} = create_client_for_authorize()
+
+      for extra <- [%{"client_secret" => "s"}, %{"client_assertion" => "a"}] do
+        conn = post_form("/token", refresh_params(client_id, extra))
+        assert conn.status == 400
+        assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+      end
+    end
+
+    test "Basic authentication is 401 invalid_client with a Basic challenge (§3.2.4)" do
+      {client_id, _} = create_client_for_authorize()
+      basic = [{"authorization", "Basic " <> Base.encode64(client_id <> ":")}]
+
+      for path <- ["/token", "/revoke"] do
+        params = if path == "/token", do: refresh_params(client_id), else: %{"token" => "x"}
+        conn = post_form(path, params, basic)
+
+        assert conn.status == 401, "expected 401 for #{path}"
+        assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+
+        assert [~s|Basic realm="https://app.example.com"|] =
+                 get_resp_header(conn, "www-authenticate")
+      end
+    end
+
+    test "more than one authentication mechanism is invalid_request (§3.2.4)" do
+      {client_id, _} = create_client_for_authorize()
+
+      conn =
+        post_form("/token", refresh_params(client_id, %{"client_secret" => "s"}), [
+          {"authorization", "Basic " <> Base.encode64(client_id <> ":s")}
+        ])
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    end
+  end
+
+  describe "Errors.describe_token_error/1" do
+    test "maps a reason it does not know to a server error, not a client error" do
+      assert {500, "server_error", _} = Errors.describe_token_error(:server_error)
+      assert {500, "server_error", _} = Errors.describe_token_error(%RuntimeError{})
+      assert {400, "invalid_request", _} = Errors.describe_token_error(:invalid_request)
     end
   end
 
@@ -429,10 +824,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
 
   # ── helpers ────────────────────────────────────────────────────────────────
 
-  defp create_client_for_authorize do
-    conn = register_client("https://chat.example.com/cb")
+  defp create_client_for_authorize(redirect_uri \\ "https://chat.example.com/cb") do
+    conn = register_client(redirect_uri)
     body = Jason.decode!(conn.resp_body)
-    {body["client_id"], "https://chat.example.com/cb"}
+    {body["client_id"], redirect_uri}
   end
 
   defp authorize_query(client_id, redirect_uri, challenge) do

@@ -41,7 +41,8 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
     {:ok, client, body} =
       Register.register(Server, %{
         "client_name" => "Test Client",
-        "redirect_uris" => [redirect_uri]
+        "redirect_uris" => [redirect_uri],
+        "grant_types" => ["authorization_code", "refresh_token"]
       })
 
     {client, body}
@@ -71,7 +72,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
 
       assert client.client_name == "Test Client"
       assert client.redirect_uris == ["https://chat.example.com/cb"]
-      assert client.grant_types == ["authorization_code"]
+      assert client.grant_types == ["authorization_code", "refresh_token"]
       assert client.token_endpoint_auth_method == "none"
       assert body["client_id"] == client.id
       assert body["scope"] == "mcp"
@@ -121,10 +122,10 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
     end
 
     test "gated server rejects registration without an initial access token" do
-      # RFC 7591 §3.2.2 — this is a Bearer-auth failure (the
+      # RFC 6750 §3.1 — a request without authentication (the
       # controller must emit 401 with WWW-Authenticate), not a
       # `invalid_client_metadata` 400.
-      assert {:error, :invalid_initial_access_token} =
+      assert {:error, :missing_initial_access_token} =
                Register.register(Oauth2ServerTest.GatedServer, %{
                  "client_name" => "X",
                  "redirect_uris" => ["https://app.example.com/cb"]
@@ -178,7 +179,121 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       params =
         authorize_params(%{id: Ash.UUIDv7.generate()}, challenge, "https://chat.example.com/cb")
 
-      assert {:error, "invalid_client", _} = Authorize.validate_request(Server, params)
+      assert {:error, :bad_client, "invalid_client", _} =
+               Authorize.validate_request(Server, params)
+    end
+
+    test "validates the client and redirect_uri before any other error (OAuth 2.1 §4.1.2.1)" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+
+      unknown_client =
+        %{id: Ash.UUIDv7.generate()}
+        |> authorize_params(challenge, "https://chat.example.com/cb")
+        |> Map.put("response_type", "token")
+
+      assert {:error, :bad_client, "invalid_client", _} =
+               Authorize.validate_request(Server, unknown_client)
+
+      bad_redirect =
+        client
+        |> authorize_params(challenge, "https://attacker.example.com/cb")
+        |> Map.put("response_type", "token")
+
+      assert {:error, :bad_redirect_uri} = Authorize.validate_request(Server, bad_redirect)
+    end
+
+    test "a parameter that is not a string is invalid_request, not omitted" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+      params = authorize_params(client, challenge, "https://chat.example.com/cb")
+
+      for key <- ["resource", "scope", "state"] do
+        assert {:error, "invalid_request", _} =
+                 Authorize.validate_request(Server, Map.put(params, key, %{"x" => "y"}))
+      end
+    end
+
+    test "redirect_uri defaults to the only registered one (OAuth 2.1 §2.3.2)" do
+      {client, _} = register_client("https://chat.example.com/cb")
+      {_, challenge} = pkce_pair()
+
+      params =
+        client
+        |> authorize_params(challenge, "https://chat.example.com/cb")
+        |> Map.delete("redirect_uri")
+
+      assert {:ok, %{redirect_uri: "https://chat.example.com/cb"}} =
+               Authorize.validate_request(Server, params)
+
+      {:ok, two_uris, _} =
+        Register.register(Server, %{
+          "client_name" => "Two",
+          "redirect_uris" => ["https://chat.example.com/cb", "https://chat.example.com/other"]
+        })
+
+      assert {:error, :bad_redirect_uri} =
+               Authorize.validate_request(Server, %{params | "client_id" => two_uris.id})
+
+      assert {:ok, "https://chat.example.com/cb"} = Authorize.error_redirect_uri(Server, params)
+
+      assert :error =
+               Authorize.error_redirect_uri(Server, %{params | "client_id" => two_uris.id})
+
+      assert :error =
+               Authorize.error_redirect_uri(
+                 Server,
+                 Map.put(params, "redirect_uri", "https://attacker.example.com/cb")
+               )
+
+      assert :error = Authorize.error_redirect_uri(Server, Map.delete(params, "client_id"))
+
+      malformed = Map.put(params, "redirect_uri", %{"x" => "y"})
+      assert {:error, :bad_redirect_uri} = Authorize.validate_request(Server, malformed)
+      assert :error = Authorize.error_redirect_uri(Server, malformed)
+    end
+
+    test "error_description stays inside the allowed character set (OAuth 2.1 §4.1.2.1)" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+      params = authorize_params(client, challenge, "https://chat.example.com/cb")
+
+      for scope <- ["unknown.scope", ~s|bad"scope|, "bad\\scope", "bäd"] do
+        assert {:error, "invalid_scope", desc} =
+                 Authorize.validate_request(Server, %{params | "scope" => scope})
+
+        assert desc =~ ~r/\A[\x20-\x21\x23-\x5B\x5D-\x7E]*\z/
+      end
+    end
+
+    test "a missing scope is invalid_scope (OAuth 2.1 §1.4.1)" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+
+      params =
+        client
+        |> authorize_params(challenge, "https://chat.example.com/cb")
+        |> Map.delete("scope")
+
+      assert {:error, "invalid_scope", _} = Authorize.validate_request(Server, params)
+    end
+
+    test "reports a malformed request before an unsupported value" do
+      {client, _} = register_client()
+      {_, challenge} = pkce_pair()
+
+      params =
+        client
+        |> authorize_params(challenge, "https://chat.example.com/cb")
+        |> Map.merge(%{"response_type" => "token", "resource" => "https://other.example.com"})
+
+      assert {:error, "unsupported_response_type", _} = Authorize.validate_request(Server, params)
+
+      assert {:error, "invalid_request", _} =
+               Authorize.validate_request(Server, Map.delete(params, "code_challenge"))
+
+      assert {:error, "invalid_request", _} =
+               Authorize.validate_request(Server, Map.delete(params, "response_type"))
     end
 
     test "rejects mismatched redirect_uri without leaking via redirect" do
@@ -498,6 +613,142 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
                  "resource" => Server.resource_url()
                })
     end
+
+    test "rejects an unacceptable resource at token time with :invalid_target (RFC 8707 §2)",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      assert {:error, :invalid_target} =
+               Token.exchange_authorization_code(Server, %{
+                 "grant_type" => "authorization_code",
+                 "code" => code.id,
+                 "redirect_uri" => "https://chat.example.com/cb",
+                 "code_verifier" => verifier,
+                 "client_id" => client.id,
+                 "resource" => "https://other.example.com/api"
+               })
+    end
+
+    test "a missing code_verifier is invalid_request and leaves the code usable (OAuth 2.1 §3.2.4)",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      params = %{
+        "grant_type" => "authorization_code",
+        "code" => code.id,
+        "redirect_uri" => "https://chat.example.com/cb",
+        "client_id" => client.id
+      }
+
+      assert {:error, :invalid_request} = Token.exchange_authorization_code(Server, params)
+
+      assert {:error, :invalid_request} =
+               Token.exchange_authorization_code(Server, Map.put(params, "code_verifier", ""))
+
+      assert {:ok, _} =
+               Token.exchange_authorization_code(
+                 Server,
+                 Map.put(params, "code_verifier", verifier)
+               )
+    end
+
+    test "accepts a token request without redirect_uri (OAuth 2.1 §4.1.3)", %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      assert {:ok, _} =
+               Token.exchange_authorization_code(Server, %{
+                 "grant_type" => "authorization_code",
+                 "code" => code.id,
+                 "code_verifier" => verifier,
+                 "client_id" => client.id
+               })
+    end
+
+    test "an unknown client is invalid_client (OAuth 2.1 §3.2.4)" do
+      assert {:error, :invalid_client} =
+               Token.exchange_authorization_code(Server, %{
+                 "grant_type" => "authorization_code",
+                 "code" => "code",
+                 "code_verifier" => "verifier",
+                 "client_id" => "unknown-client"
+               })
+
+      assert {:error, :invalid_client} =
+               Token.exchange_refresh_token(Server, %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => "token",
+                 "client_id" => "unknown-client"
+               })
+    end
+
+    test "a failed exchange leaves the code usable, and grant errors come before target errors",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      params = %{
+        "grant_type" => "authorization_code",
+        "code" => code.id,
+        "code_verifier" => verifier,
+        "client_id" => client.id
+      }
+
+      assert {:error, :pkce} =
+               Token.exchange_authorization_code(Server, %{params | "code_verifier" => "wrong"})
+
+      assert {:error, :redirect_mismatch} =
+               Token.exchange_authorization_code(
+                 Server,
+                 Map.merge(params, %{
+                   "redirect_uri" => "https://other.example.com/cb",
+                   "resource" => "https://other.example.com/api"
+                 })
+               )
+
+      assert {:error, :invalid_target} =
+               Token.exchange_authorization_code(
+                 Server,
+                 Map.put(params, "resource", "https://other.example.com/api")
+               )
+
+      assert {:ok, _} = Token.exchange_authorization_code(Server, params)
+      assert {:error, :reuse} = Token.exchange_authorization_code(Server, params)
+    end
   end
 
   describe "refresh_token grant" do
@@ -614,6 +865,199 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
 
       assert length(rows_after) == 4
       assert Enum.all?(rows_after, &(not is_nil(&1.revoked_at)))
+    end
+
+    test "rejects an unacceptable resource with :invalid_target and keeps the grant usable",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      {:ok, first} =
+        Token.exchange_authorization_code(Server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "redirect_uri" => "https://chat.example.com/cb",
+          "code_verifier" => verifier,
+          "client_id" => client.id,
+          "resource" => Server.resource_url()
+        })
+
+      refresh_params = %{
+        "grant_type" => "refresh_token",
+        "refresh_token" => first.refresh_token,
+        "client_id" => client.id
+      }
+
+      assert {:error, :invalid_target} =
+               Token.exchange_refresh_token(
+                 Server,
+                 Map.put(refresh_params, "resource", "https://other.example.com/api")
+               )
+
+      assert {:ok, _} =
+               Token.exchange_refresh_token(
+                 Server,
+                 Map.put(refresh_params, "resource", Server.resource_url())
+               )
+    end
+
+    test "an empty refresh_token is invalid_request (OAuth 2.1 §3.2)" do
+      {client, _} = register_client()
+
+      assert {:error, :invalid_request} =
+               Token.exchange_refresh_token(Server, %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => "",
+                 "client_id" => client.id
+               })
+    end
+
+    test "a replayed refresh token is detected even with a wrong resource (OAuth 2.1 §4.3.1)",
+         %{user: user} do
+      {client, _} = register_client()
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      {:ok, first} =
+        Token.exchange_authorization_code(Server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "code_verifier" => verifier,
+          "client_id" => client.id
+        })
+
+      refresh_params = fn rt, resource ->
+        %{
+          "grant_type" => "refresh_token",
+          "refresh_token" => rt,
+          "client_id" => client.id,
+          "resource" => resource
+        }
+      end
+
+      {:ok, second} =
+        Token.exchange_refresh_token(Server, refresh_params.(first.refresh_token, nil))
+
+      assert {:error, :reuse} =
+               Token.exchange_refresh_token(
+                 Server,
+                 refresh_params.(first.refresh_token, "https://other.example.com/api")
+               )
+
+      assert {:error, :revoked} =
+               Token.exchange_refresh_token(Server, refresh_params.(second.refresh_token, nil))
+    end
+
+    test "scope on refresh narrows the access token and rejects a wider scope (OAuth 2.1 §4.3.1)",
+         %{user: user} do
+      server = Oauth2ServerTest.DynamicScopesServer
+
+      {:ok, client, _} =
+        Register.register(server, %{
+          "client_name" => "Test",
+          "redirect_uris" => ["https://chat.example.com/cb"],
+          "grant_types" => ["authorization_code", "refresh_token"]
+        })
+
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          server,
+          client
+          |> authorize_params(challenge, "https://chat.example.com/cb")
+          |> Map.merge(%{"scope" => "mcp dynamic.scope", "resource" => server.resource_url()})
+        )
+
+      code = Authorize.issue_code!(server, user, validated)
+
+      {:ok, first} =
+        Token.exchange_authorization_code(server, %{
+          "grant_type" => "authorization_code",
+          "code" => code.id,
+          "code_verifier" => verifier,
+          "client_id" => client.id
+        })
+
+      refresh = fn rt, scope ->
+        Token.exchange_refresh_token(server, %{
+          "grant_type" => "refresh_token",
+          "refresh_token" => rt,
+          "client_id" => client.id,
+          "scope" => scope
+        })
+      end
+
+      assert {:error, :invalid_scope} = refresh.(first.refresh_token, "mcp other")
+
+      assert {:ok, narrowed} = refresh.(first.refresh_token, "mcp")
+      assert narrowed.scope == "mcp"
+      assert {:ok, %{"scope" => "mcp"}} = Jwt.verify(server, narrowed.access_token)
+
+      # The new refresh token keeps the scope of the grant.
+      assert {:ok, full} = refresh.(narrowed.refresh_token, nil)
+      assert full.scope == "mcp dynamic.scope"
+
+      # A replay is reuse, even when it also asks for a wider scope.
+      assert {:error, :reuse} = refresh.(first.refresh_token, "mcp other")
+
+      # A scope that is not a string is a malformed request.
+      for scope <- [%{"x" => "y"}, ["mcp"]] do
+        assert {:error, :invalid_request} = refresh.(full.refresh_token, scope)
+      end
+    end
+
+    test "a client without the refresh_token grant gets no refresh token (OAuth 2.1 §3.2.4)",
+         %{user: user} do
+      {:ok, client, body} =
+        Register.register(Server, %{
+          "client_name" => "Default grants",
+          "redirect_uris" => ["https://chat.example.com/cb"]
+        })
+
+      assert body["grant_types"] == ["authorization_code"]
+
+      {verifier, challenge} = pkce_pair()
+
+      {:ok, validated} =
+        Authorize.validate_request(
+          Server,
+          authorize_params(client, challenge, "https://chat.example.com/cb")
+        )
+
+      code = Authorize.issue_code!(Server, user, validated)
+
+      assert {:ok, %{refresh_token: nil, access_token: access_token}} =
+               Token.exchange_authorization_code(Server, %{
+                 "grant_type" => "authorization_code",
+                 "code" => code.id,
+                 "code_verifier" => verifier,
+                 "client_id" => client.id
+               })
+
+      assert is_binary(access_token)
+
+      assert {:error, :unauthorized_client} =
+               Token.exchange_refresh_token(Server, %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => "any",
+                 "client_id" => client.id
+               })
     end
   end
 end

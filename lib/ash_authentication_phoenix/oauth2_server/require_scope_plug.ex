@@ -37,6 +37,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug do
     * `:scope` (required) — a scope string or list of scope strings; the
       token must carry **all** of them
     * `:description` — optional `error_description` for the challenge
+    * `:resource` — the name of the protected resource. Its metadata URL goes
+      in the challenge. Required when the server configures more than one
+      resource. Use the same value as on `BearerPlug`.
 
   ## Scope hierarchies
 
@@ -54,15 +57,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug do
 
   @impl Plug
   def init(opts) do
+    server = Keyword.fetch!(opts, :oauth2_server)
+    resource = Keyword.get(opts, :resource)
+    AshAuthentication.Oauth2Server.__check_resource_option__!(server, resource)
+
     %{
-      server: Keyword.fetch!(opts, :oauth2_server),
+      server: server,
+      resource: resource,
       scopes: opts |> Keyword.fetch!(:scope) |> List.wrap(),
       description: Keyword.get(opts, :description)
     }
   end
 
   @impl Plug
-  def call(conn, %{server: server, scopes: required, description: description}) do
+  def call(conn, %{server: server, resource: resource, scopes: required, description: description}) do
     case conn.assigns[:oauth_claims] do
       %{} = claims ->
         granted =
@@ -76,17 +84,19 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug do
         else
           Errors.send_insufficient_scope(conn, server, required,
             description: description,
-            tenant: Ash.PlugHelpers.get_tenant(conn)
+            tenant: Ash.PlugHelpers.get_tenant(conn),
+            resource: resource
           )
         end
 
       _ ->
-        unauthorized(conn, server)
+        unauthorized(conn, server, resource)
     end
   end
 
-  defp unauthorized(conn, server) do
-    metadata_url = Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn))
+  defp unauthorized(conn, server, resource) do
+    metadata_url =
+      Errors.resource_metadata_url(server, Ash.PlugHelpers.get_tenant(conn), resource)
 
     conn
     |> put_resp_header(
