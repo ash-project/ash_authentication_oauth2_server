@@ -34,7 +34,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
           redirect_uri: String.t(),
           code_challenge: String.t(),
           scope: String.t(),
-          state: String.t(),
+          state: String.t() | nil,
           resource: String.t()
         }
 
@@ -48,19 +48,23 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
     * `{:ok, validated}` — request is structurally sound and the client +
       redirect_uri are known.
+    * `{:error, :bad_client, error_code, description}` — `client_id` is
+      missing or unknown. Per OAuth 2.1 §4.1.2.1 the controller MUST NOT
+      redirect.
     * `{:error, :bad_redirect_uri}` — redirect_uri is missing or doesn't
       match a registered URI; per RFC 6749 §4.1.2.1 the controller MUST NOT
       redirect.
     * `{:error, error_code, description}` — any other validation error.
-      Controllers redirect these errors back to `redirect_uri`.
+      The client and the redirect URI are validated before any of these,
+      so controllers redirect these errors to `error_redirect_uri/3`.
 
   ## A note on the `state` parameter
 
-  Clients MUST set `state` to a cryptographically random, unguessable
-  value (RFC 6749 §10.12 / RFC 9700 §4.7). The server echoes it back via
-  the redirect so the client can correlate the response with its
-  pending request — and verify the response didn't come from a CSRF or
-  injection attack.
+  `state` is optional (OAuth 2.1 §4.1.1). This server requires PKCE, which
+  already protects the flow against CSRF (RFC 9700 §4.7). A client that
+  sends `state` MUST set it to a cryptographically random, unguessable
+  value. The server echoes it back via the redirect so the client can
+  correlate the response with its pending request.
 
   This means **clients should NOT use `state` as a stash for
   application-level data** like a "return-to" URL or routing hints. That
@@ -75,32 +79,64 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   """
   @spec validate_request(server :: module(), params :: map(), opts()) ::
           {:ok, validated()}
+          | {:error, :bad_client, String.t(), String.t()}
           | {:error, :bad_redirect_uri}
           | {:error, String.t(), String.t()}
   def validate_request(server, params, opts \\ []) do
     secret_context = secret_context(Keyword.get(opts, :tenant))
 
-    with :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
-         {:ok, client} <- load_client(server, params, opts),
-         :ok <- check_redirect_uri(params, client),
-         :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
-         {:ok, resource} <- resolve_resource(server, params, secret_context),
+    # OAuth 2.1 §4.1.2.1: client and redirect URI first, because only
+    # errors after them may be redirected. Then malformed-request errors,
+    # then the values the server does not accept.
+    with {:ok, client} <- load_client(server, params, opts),
+         {:ok, redirect_uri} <- resolve_redirect_uri(params, client),
+         {:ok, _response_type} <- require_present(params, "response_type"),
          {:ok, code_challenge} <- require_present(params, "code_challenge"),
-         {:ok, scope} <- require_present(params, "scope"),
+         :ok <- check_string_params(params, ["resource", "scope", "state"]),
+         :ok <- require_eq(params, "code_challenge_method", "S256", "invalid_request"),
+         :ok <- require_eq(params, "response_type", "code", "unsupported_response_type"),
+         {:ok, scope} <- require_scope(params),
          :ok <- check_scopes(server, scope),
-         {:ok, redirect_uri} <- require_present(params, "redirect_uri"),
-         {:ok, state} <- require_present(params, "state") do
+         {:ok, resource} <- resolve_resource(server, params, secret_context) do
       {:ok,
        %{
          client: client,
          redirect_uri: redirect_uri,
          code_challenge: code_challenge,
          scope: scope,
-         state: state,
+         state: optional(params, "state"),
          resource: resource
        }}
     end
   end
+
+  @doc """
+  The redirect URI for an error that `validate_request/3` returned as
+  `{:error, error_code, description}`: the request's `redirect_uri`, or the
+  client's only registered redirect URI when the request omits it.
+
+  Applies the same match as `validate_request/3`, so it returns `:error`
+  for any URI that `validate_request/3` would not redirect to. Reads the
+  client from the database only. It never fetches a Client ID Metadata
+  Document, because `validate_request/3` already stored it.
+  """
+  @spec error_redirect_uri(server :: module(), params :: map(), opts()) ::
+          {:ok, String.t()} | :error
+  def error_redirect_uri(server, params, opts \\ []) do
+    with {:ok, client} <- find_client(server, params["client_id"], opts),
+         {:ok, redirect_uri} <- resolve_redirect_uri(params, client) do
+      {:ok, redirect_uri}
+    else
+      _ -> :error
+    end
+  end
+
+  defp find_client(server, "https://" <> _ = url, opts), do: CIMD.find_client(server, url, opts)
+
+  defp find_client(server, client_id, opts) when is_binary(client_id) and client_id != "",
+    do: Ash.get(server.client_resource(), client_id, ash_opts(opts))
+
+  defp find_client(_server, _client_id, _opts), do: :error
 
   @doc """
   Has the user already consented to this client at a scope that covers the
@@ -193,6 +229,33 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     end
   end
 
+  # A query like `resource[x]=y` decodes to a map. That is a malformed
+  # parameter, `invalid_request`, not an omitted one (OAuth 2.1 §4.1.2.1).
+  defp check_string_params(params, keys) do
+    case Enum.find(keys, &(not (is_nil(params[&1]) or is_binary(params[&1])))) do
+      nil -> :ok
+      key -> {:error, "invalid_request", "#{key} must be a string"}
+    end
+  end
+
+  # OAuth 2.1 §3.1: a parameter sent without a value counts as omitted.
+  defp optional(params, key) do
+    case Map.get(params, key) do
+      "" -> nil
+      value when is_binary(value) -> value
+      _ -> nil
+    end
+  end
+
+  # OAuth 2.1 §1.4.1: without a default scope, a request that omits
+  # `scope` fails as `invalid_scope`.
+  defp require_scope(params) do
+    case require_present(params, "scope") do
+      {:ok, scope} -> {:ok, scope}
+      {:error, _code, _desc} -> {:error, "invalid_scope", "scope is required"}
+    end
+  end
+
   defp require_present(params, key) do
     case Map.get(params, key) do
       v when is_binary(v) and v != "" -> {:ok, v}
@@ -206,22 +269,29 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     if server.cimd_enabled?() do
       case CIMD.resolve_client(server, url, opts) do
         {:ok, client} -> {:ok, client}
-        {:error, description} -> {:error, "invalid_client", description}
+        {:error, description} -> {:error, :bad_client, "invalid_client", description}
       end
     else
-      {:error, "invalid_client", "URL client_ids are not supported by this server"}
+      {:error, :bad_client, "invalid_client", "URL client_ids are not supported by this server"}
     end
   end
 
-  defp load_client(server, %{"client_id" => id}, opts) do
+  defp load_client(server, %{"client_id" => id}, opts) when is_binary(id) and id != "" do
     case Ash.get(server.client_resource(), id, ash_opts(opts)) do
       {:ok, client} -> {:ok, client}
-      _ -> {:error, "invalid_client", "unknown client_id"}
+      _ -> {:error, :bad_client, "invalid_client", "unknown client_id"}
     end
   end
 
-  defp load_client(_server, _params, _opts),
-    do: {:error, "invalid_request", "client_id required"}
+  defp load_client(_server, params, _opts) do
+    case Map.fetch(params, "client_id") do
+      {:ok, id} when id not in [nil, ""] ->
+        {:error, :bad_client, "invalid_request", "client_id must be a string"}
+
+      _ ->
+        {:error, :bad_client, "invalid_request", "client_id required"}
+    end
+  end
 
   # RFC 9700 §4.1 — exact byte-equal match. No normalization, no
   # default-port elision, no trailing-slash equivalence. The client MUST
@@ -241,16 +311,29 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   # them entirely. We include `localhost` here too, accepting the same
   # theoretical, local-machine-only risk the IP-literal exception
   # already accepts.
-  defp check_redirect_uri(%{"redirect_uri" => uri}, %{redirect_uris: uris})
-       when is_binary(uri) and is_list(uris) do
-    if Enum.any?(uris, &redirect_uri_match?(uri, &1)) do
-      :ok
-    else
-      {:error, :bad_redirect_uri}
+  # OAuth 2.1 §2.3.2: `redirect_uri` is optional when the client has
+  # exactly one registered redirect URI.
+  # A `redirect_uri` that is not a string is malformed, not omitted.
+  defp resolve_redirect_uri(%{"redirect_uri" => uri}, _client)
+       when not is_nil(uri) and not is_binary(uri),
+       do: {:error, :bad_redirect_uri}
+
+  defp resolve_redirect_uri(params, %{redirect_uris: uris}) when is_list(uris) do
+    case {optional(params, "redirect_uri"), uris} do
+      {nil, [only]} ->
+        {:ok, only}
+
+      {nil, _} ->
+        {:error, :bad_redirect_uri}
+
+      {uri, uris} ->
+        if Enum.any?(uris, &redirect_uri_match?(uri, &1)),
+          do: {:ok, uri},
+          else: {:error, :bad_redirect_uri}
     end
   end
 
-  defp check_redirect_uri(_, _), do: {:error, :bad_redirect_uri}
+  defp resolve_redirect_uri(_, _), do: {:error, :bad_redirect_uri}
 
   @loopback_hosts ["127.0.0.1", "::1", "localhost"]
 
@@ -278,11 +361,20 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
       case MapSet.difference(requested, allowed) |> MapSet.to_list() do
         [] -> :ok
-        [unknown | _] -> {:error, "invalid_scope", "scope #{inspect(unknown)} not allowed"}
+        [unknown | _] -> {:error, "invalid_scope", scope_error_description(unknown)}
       end
     else
       :ok
     end
+  end
+
+  # OAuth 2.1 §4.1.2.1 limits `error_description` to %x20-21 / %x23-5B /
+  # %x5D-7E. A valid scope token (RFC 6749 §3.3) uses only those characters,
+  # so it is safe to echo. Any other value is left out.
+  defp scope_error_description(scope) do
+    if scope =~ ~r/\A[\x21\x23-\x5B\x5D-\x7E]+\z/,
+      do: "scope #{scope} is not allowed",
+      else: "requested scope is not allowed"
   end
 
   # `resource` is optional per RFC 8707 §2 — when absent, default to the

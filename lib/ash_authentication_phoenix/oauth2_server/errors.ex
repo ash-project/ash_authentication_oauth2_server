@@ -72,7 +72,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       |> Enum.reject(fn {_, v} -> is_nil(v) end)
       |> Enum.map_join(", ", fn {k, v} -> ~s|#{k}="#{escape_quoted(v)}"| end)
 
-    "Bearer " <> challenge
+    String.trim_trailing("Bearer " <> challenge)
   end
 
   # WWW-Authenticate quoted-string values: backslash-escape `"` and `\`.
@@ -144,6 +144,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   Translate a `:reason` atom returned from a core module into an
   `{http_status, error_code, description}` triple suitable for an OAuth
   error response.
+
+  A reason that is not listed here is a server fault, not a malformed
+  request, so it maps to `500`.
   """
   @spec describe_token_error(atom()) :: {pos_integer(), String.t(), String.t()}
   def describe_token_error(reason) do
@@ -151,15 +154,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
       :reuse -> {400, "invalid_grant", "code or refresh token already used"}
       :expired -> {400, "invalid_grant", "expired"}
       :pkce -> {400, "invalid_grant", "PKCE verification failed"}
-      :resource_mismatch -> {400, "invalid_grant", "resource does not match"}
+      :resource_mismatch -> {400, "invalid_grant", "grant was issued for a different resource"}
+      :invalid_target -> {400, "invalid_target", "requested resource is not acceptable"}
       :redirect_mismatch -> {400, "invalid_grant", "redirect_uri mismatch"}
       :invalid_code -> {400, "invalid_grant", "code not found or invalid"}
       :invalid_refresh -> {400, "invalid_grant", "refresh token invalid"}
       :revoked -> {400, "invalid_grant", "refresh token revoked"}
       :client_mismatch -> {400, "invalid_grant", "client mismatch"}
+      :invalid_client -> {400, "invalid_client", "unknown client"}
+      :unsupported_client_authentication -> {400, "invalid_client", "public client"}
+      :unauthorized_client -> {400, "unauthorized_client", "grant type not registered"}
+      :invalid_scope -> {400, "invalid_scope", "requested scope exceeds the grant"}
       :invalid_request -> {400, "invalid_request", "missing required parameters"}
       :refresh_create_failed -> {500, "server_error", "could not issue refresh token"}
-      _ -> {400, "invalid_request", "request could not be processed"}
+      _ -> {500, "server_error", "request could not be processed"}
     end
   end
 

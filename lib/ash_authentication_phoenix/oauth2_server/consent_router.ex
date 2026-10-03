@@ -23,8 +23,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
 
   use Plug.Router, copy_opts_to_assign: :oauth2_server_router_opts
 
-  alias AshAuthentication.Oauth2Server
-  alias AshAuthentication.Oauth2Server.{Authorize, CIMD}
+  alias AshAuthentication.Oauth2Server.Authorize
   alias AshAuthentication.Phoenix.Oauth2Server.{ConsentView, Errors}
 
   @max_state_bytes 2048
@@ -69,9 +68,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
       end
     else
       {:error, :no_user} -> sign_in_redirect(conn, server)
+      {:error, :bad_client, code, desc} -> Errors.send_oauth_error(conn, 400, code, desc)
       {:error, :bad_redirect_uri} -> bad_redirect_html(conn)
       {:error, :state_too_large} -> bad_state_html(conn)
-      {:error, code, desc} -> handle_authorize_error(conn, server, params, code, desc)
+      {:error, code, desc} -> redirect_authorize_error(conn, server, params, code, desc)
     end
   end
 
@@ -124,8 +124,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
       end
     else
       {:error, :no_user} -> sign_in_redirect(conn, server)
+      {:error, :bad_client, code, desc} -> Errors.send_oauth_error(conn, 400, code, desc)
       {:error, :bad_redirect_uri} -> bad_redirect_html(conn)
-      {:error, code, desc} -> handle_authorize_error(conn, server, params, code, desc)
+      {:error, code, desc} -> redirect_authorize_error(conn, server, params, code, desc)
     end
   end
 
@@ -145,15 +146,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     code = Authorize.issue_code!(server, user, validated, tenant_opts(conn))
 
     location =
-      validated.redirect_uri <>
-        "?" <>
-        URI.encode_query(%{
+      append_query(
+        validated.redirect_uri,
+        %{
           "code" => code.id,
-          "state" => validated.state,
           # RFC 9207 — identify the issuer in the authorization response
           # so the client can detect authorization-server mix-up attacks.
           "iss" => issuer(conn, server)
-        })
+        }
+        |> maybe_put_param("state", validated.state)
+      )
 
     conn
     |> put_resp_header("location", location)
@@ -161,15 +163,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     |> halt()
   end
 
-  # RFC 6749 §4.1.2.1: when redirect_uri has been validated for the client,
+  # RFC 6749 §4.1.2.1: once the client and redirect_uri are validated,
   # error responses MUST go back via 302 with `error`, `error_description`,
   # and `state` so the client can surface the failure to the end user.
-  # When we can't safely validate the redirect_uri (unknown client, bad URI,
-  # response_type bad before client was loaded), fall back to a direct
-  # error response since redirecting an unverified URI is the worse failure
-  # mode (open-redirect / token leak).
-  defp handle_authorize_error(conn, server, params, code, desc) do
-    case safe_redirect_uri(server, params, conn) do
+  # `Authorize.error_redirect_uri/3` applies the same exact match as a
+  # successful request. Without a valid target the error goes to the user
+  # agent directly (OAuth 2.1 §4.1.2.1).
+  defp redirect_authorize_error(conn, server, params, code, desc) do
+    case Authorize.error_redirect_uri(server, params, tenant_opts(conn)) do
       {:ok, redirect_uri} ->
         redirect_with_oauth_error(
           conn,
@@ -193,9 +194,24 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
       |> maybe_put_param("state", state)
 
     conn
-    |> put_resp_header("location", redirect_uri <> "?" <> URI.encode_query(query))
+    |> put_resp_header("location", append_query(redirect_uri, query))
     |> send_resp(302, "")
     |> halt()
+  end
+
+  # OAuth 2.1 §2.3: a query in the redirect URI MUST be retained when
+  # adding parameters. The URI is extended as a string, because re-encoding
+  # it with URI.to_string/1 can change the registered form (a default port,
+  # for example). Registered redirect URIs carry no fragment.
+  defp append_query(redirect_uri, params) do
+    separator =
+      case URI.parse(redirect_uri).query do
+        nil -> "?"
+        "" -> ""
+        _query -> "&"
+      end
+
+    redirect_uri <> separator <> URI.encode_query(params)
   end
 
   defp issuer(conn, server) do
@@ -208,43 +224,6 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   defp maybe_put_param(map, _key, nil), do: map
   defp maybe_put_param(map, _key, ""), do: map
   defp maybe_put_param(map, key, value), do: Map.put(map, key, value)
-
-  defp safe_redirect_uri(server, %{"client_id" => client_id, "redirect_uri" => uri}, conn)
-       when is_binary(client_id) and is_binary(uri) and client_id != "" and uri != "" do
-    with {:ok, client} <- lookup_client(server, client_id, conn),
-         registered when is_list(registered) <- Map.get(client, :redirect_uris) do
-      normalized = Oauth2Server.__normalize_url__(uri)
-      registered_normalized = Enum.map(registered, &Oauth2Server.__normalize_url__/1)
-      if normalized in registered_normalized, do: {:ok, uri}, else: :error
-    else
-      _ -> :error
-    end
-  end
-
-  defp safe_redirect_uri(_server, _params, _conn), do: :error
-
-  # CIMD client_ids resolve from the database only here — this runs on the
-  # *error* path, where triggering an outbound fetch would be a free SSRF
-  # lever. A CIMD client we've never successfully resolved gets the direct
-  # 400 page instead of a redirect, which is the safe fallback anyway.
-  defp lookup_client(server, "https://" <> _ = url, conn) do
-    if server.cimd_enabled?() do
-      case CIMD.find_client(server, url, tenant_opts(conn)) do
-        {:ok, client} -> {:ok, client}
-        :error -> :error
-      end
-    else
-      :error
-    end
-  end
-
-  defp lookup_client(server, client_id, conn) do
-    opts =
-      [context: %{private: %{ash_authentication?: true}}]
-      |> Keyword.merge(tenant_opts(conn))
-
-    Ash.get(server.client_resource(), client_id, opts)
-  end
 
   defp tenant_opts(conn) do
     case Ash.PlugHelpers.get_tenant(conn) do
