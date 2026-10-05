@@ -80,5 +80,5 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentView do
   def render(:consent, assigns), do: render_consent(assigns)
 
   @doc false
-  def h(value), do: Phoenix.HTML.html_escape(to_string(value)) |> Phoenix.HTML.safe_to_string()
+  def h(value), do: value |> to_string() |> Plug.HTML.html_escape()
 end

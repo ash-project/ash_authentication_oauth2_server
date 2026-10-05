@@ -109,7 +109,6 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       # needed when `cimd_enabled?: true` with the default `:cimd_fetcher`.
       {:req, "~> 0.5", optional: true},
       # Dev / test
-      {:ash_phoenix, "~> 2.3 and >= 2.3.11", only: [:dev, :test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.2", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.18", only: [:dev, :test]},
@@ -117,10 +116,7 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       {:ex_doc, "~> 0.37-rc", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.5 and >= 0.5.25", optional: true},
-      {:makeup_html, ">= 0.0.0", only: :dev, runtime: false},
-      {:mimic, "~> 2.1", only: [:dev, :test]},
       {:mix_audit, "~> 2.1", only: [:dev, :test]},
-      {:plug_cowboy, "~> 2.5", only: [:dev, :test]},
       {:sobelow, "~> 0.13", only: [:dev, :test]}
     ]
   end
