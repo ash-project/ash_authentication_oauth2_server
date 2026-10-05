@@ -83,6 +83,40 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       groups_for_extras: [
         Topics: ~r'documentation/topics'
       ],
+      filter_modules: fn mod, _ -> not String.starts_with?(inspect(mod), "Dev.") end,
+      nest_modules_by_prefix: [
+        AshAuthentication.Oauth2Server,
+        AshAuthentication.Phoenix.Oauth2Server
+      ],
+      groups_for_modules: [
+        Extensions: [
+          AshAuthentication.Oauth2Server,
+          AshAuthentication.Oauth2Server.ClientResource,
+          AshAuthentication.Oauth2Server.AuthorizationCodeResource,
+          AshAuthentication.Oauth2Server.RefreshTokenResource
+        ],
+        Introspection: [
+          AshAuthentication.Oauth2Server.ClientResource.Info,
+          AshAuthentication.Oauth2Server.AuthorizationCodeResource.Info,
+          AshAuthentication.Oauth2Server.RefreshTokenResource.Info
+        ],
+        Phoenix: ~r/^AshAuthentication\.Phoenix\.Oauth2Server/,
+        Protocol: [
+          AshAuthentication.Oauth2Server.Authorize,
+          AshAuthentication.Oauth2Server.Token,
+          AshAuthentication.Oauth2Server.Register,
+          AshAuthentication.Oauth2Server.Metadata,
+          AshAuthentication.Oauth2Server.ClientMetadata,
+          AshAuthentication.Oauth2Server.PKCE,
+          AshAuthentication.Oauth2Server.Jwt
+        ],
+        "Client ID Metadata Documents": ~r/^AshAuthentication\.Oauth2Server\.CIMD/,
+        Runtime: [
+          AshAuthentication.Oauth2Server.Supervisor,
+          AshAuthentication.Oauth2Server.Expunger
+        ],
+        Internals: ~r/^AshAuthentication\.Oauth2Server\./
+      ],
       before_closing_head_tag: fn type ->
         if type == :html do
           """
