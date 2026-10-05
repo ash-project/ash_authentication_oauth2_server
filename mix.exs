@@ -41,10 +41,14 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
   def application do
     [
       extra_applications: [:logger]
-    ]
+    ] ++ application_mod(Mix.env())
   end
 
+  defp application_mod(:dev), do: [mod: {Dev.Application, []}]
+  defp application_mod(_), do: []
+
   defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(:dev), do: ["lib", "dev"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp package do
@@ -109,6 +113,12 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       # needed when `cimd_enabled?: true` with the default `:cimd_fetcher`.
       {:req, "~> 0.5", optional: true},
       # Dev / test
+      {:absinthe_plug, "~> 1.5", only: :dev},
+      {:ash_ai, "~> 1.1", only: :dev},
+      {:ash_graphql, "~> 1.12", only: :dev},
+      {:bandit, "~> 1.12", only: :dev},
+      {:phoenix_html, "~> 4.0", only: :dev},
+      {:simple_sat, "~> 0.1", only: :dev},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.2", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.18", only: [:dev, :test]},
@@ -123,6 +133,7 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
 
   defp aliases do
     [
+      dev: "phx.server",
       ci: [
         "format --check-formatted",
         "doctor --full --raise",

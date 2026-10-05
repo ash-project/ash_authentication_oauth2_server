@@ -8,6 +8,7 @@
     ~r/.Plug$/,
     ~r/^Example/,
     ~r/^Oauth2ServerTest/,
+    ~r/^Dev\./,
     AshAuthentication.Oauth2Server
   ],
   ignore_paths: [],
