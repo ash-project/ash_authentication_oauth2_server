@@ -91,6 +91,6 @@ defmodule AshAuthentication.Oauth2Server.ClientResource do
   client is not collected by `expunge_expired/2`. Best-effort; a failure
   is logged, never raised.
   """
-  @spec touch_last_used(Ash.Resource.record(), keyword) :: :ok
+  @spec touch_last_used(Ash.Resource.Record.t(), keyword) :: :ok
   defdelegate touch_last_used(client, opts \\ []), to: ClientResource.Actions
 end

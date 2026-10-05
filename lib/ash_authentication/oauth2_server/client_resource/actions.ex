@@ -55,7 +55,7 @@ defmodule AshAuthentication.Oauth2Server.ClientResource.Actions do
   client is not collected. Best-effort: failures are logged, never raised,
   so a bookkeeping write can never fail a token exchange.
   """
-  @spec touch_last_used(Ash.Resource.record(), keyword) :: :ok
+  @spec touch_last_used(Ash.Resource.Record.t(), keyword) :: :ok
   def touch_last_used(client, opts \\ []) do
     resource = client.__struct__
     action_name = Info.oauth2_server_touch_last_used_action_name!(resource)

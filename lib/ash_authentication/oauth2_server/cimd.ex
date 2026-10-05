@@ -100,7 +100,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
   data-layer details are logged, not returned.
   """
   @spec resolve_client(server :: module(), url :: String.t(), opts :: keyword()) ::
-          {:ok, Ash.Resource.record()} | {:error, String.t()}
+          {:ok, Ash.Resource.Record.t()} | {:error, String.t()}
   def resolve_client(server, url, opts \\ []) do
     ensure_client_resource_support!(server)
 
@@ -121,7 +121,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
   the client must have been resolved during authorization already.
   """
   @spec find_client(server :: module(), url :: String.t(), opts :: keyword()) ::
-          {:ok, Ash.Resource.record()} | :error
+          {:ok, Ash.Resource.Record.t()} | :error
   def find_client(server, url, opts \\ []) do
     server.client_resource()
     |> Ash.Query.filter(cimd_url == ^url)
