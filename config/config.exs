@@ -9,6 +9,8 @@ if Mix.env() == :test do
 end
 
 if Mix.env() == :dev do
+  import_config "dev.exs"
+
   config :git_ops,
     mix_project: AshAuthentication.Oauth2Server.MixProject,
     github_handle_lookup?: true,
