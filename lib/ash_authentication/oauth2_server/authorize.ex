@@ -30,7 +30,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   enough to render a consent screen and ultimately mint an authorization code.
   """
   @type validated :: %{
-          client: Ash.Resource.record(),
+          client: Ash.Resource.Record.t(),
           redirect_uri: String.t(),
           code_challenge: String.t(),
           scope: String.t(),
@@ -148,8 +148,8 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   """
   @spec consented?(
           server :: module(),
-          user :: Ash.Resource.record(),
-          client :: Ash.Resource.record(),
+          user :: Ash.Resource.Record.t(),
+          client :: Ash.Resource.Record.t(),
           requested_scope :: String.t(),
           opts()
         ) :: boolean()
@@ -168,11 +168,11 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   """
   @spec grant_consent!(
           server :: module(),
-          user :: Ash.Resource.record(),
-          client :: Ash.Resource.record(),
+          user :: Ash.Resource.Record.t(),
+          client :: Ash.Resource.Record.t(),
           scope :: String.t(),
           opts()
-        ) :: Ash.Resource.record()
+        ) :: Ash.Resource.Record.t()
   def grant_consent!(server, user, client, scope, opts \\ []) do
     server.consent_resource()
     |> Ash.Changeset.for_create(:grant, %{
@@ -189,10 +189,10 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   """
   @spec issue_code!(
           server :: module(),
-          user :: Ash.Resource.record(),
+          user :: Ash.Resource.Record.t(),
           validated :: validated(),
           opts()
-        ) :: Ash.Resource.record()
+        ) :: Ash.Resource.Record.t()
   def issue_code!(server, user, validated, opts \\ []) do
     expires_at =
       DateTime.add(DateTime.utc_now(), server.authorization_code_lifetime(), :second)

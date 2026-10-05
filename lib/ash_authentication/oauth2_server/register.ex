@@ -58,7 +58,7 @@ defmodule AshAuthentication.Oauth2Server.Register do
       a 400 DCR error response per RFC 7591 §3.2.2.
   """
   @spec register(server :: module(), params :: map(), opts :: keyword()) ::
-          {:ok, Ash.Resource.record(), map()}
+          {:ok, Ash.Resource.Record.t(), map()}
           | {:error, :dcr_disabled}
           | {:error, :missing_initial_access_token}
           | {:error, :invalid_initial_access_token}
