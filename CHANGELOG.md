@@ -5,6 +5,57 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.4.0](https://github.com/ash-project/ash_authentication_oauth2_server/compare/v0.3.1...v0.4.0) (2026-10-05)
+
+
+
+
+### Features:
+
+* protect more than one resource with one authorization server by [@maennchen](https://github.com/maennchen) [(#14)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/14)
+
+### Bug Fixes:
+
+* use Ash.Resource.Record.t() for OTP 29 compatibility by [@maennchen](https://github.com/maennchen) [(#15)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/15)
+
+* reject client credentials from public clients by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* enforce the registered grant types at the token endpoint by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* omit the error code when registration has no initial access token by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* parse the Bearer scheme case-insensitively by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* return RFC 7009 errors from the revocation endpoint by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* report token endpoint server faults as 500 by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* keep error_description inside the OAuth character set by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* keep the redirect URI query when adding response parameters by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* default redirect_uri to the client's only registered URI by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* accept an authorize request without state by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* return invalid_scope for a missing scope at the authorize endpoint by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* validate client and redirect URI before other authorize errors by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* honour the scope parameter on refresh by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* consume an authorization code only after the token request passes by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* check refresh token state before its client and resource bindings by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* return invalid_client for an unknown client at the token endpoint by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* accept a token request without redirect_uri by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* return invalid_request for missing token request parameters by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
+* return invalid_target for an unacceptable resource at the token endpoint by [@maennchen](https://github.com/maennchen) [(#13)](https://github.com/ash-project/ash_authentication_oauth2_server/pull/13)
+
 ## [v0.3.1](https://github.com/ash-project/ash_authentication_oauth2_server/compare/v0.3.0...v0.3.1) (2026-09-07)
 
 
