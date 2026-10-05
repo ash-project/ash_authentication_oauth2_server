@@ -19,7 +19,6 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       version: @version,
       elixir: "~> 1.16",
       start_permanent: Mix.env() == :prod,
-      preferred_cli_env: [ci: :test],
       elixirc_paths: elixirc_paths(Mix.env()),
       package: package(),
       deps: deps(),
@@ -33,6 +32,10 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       ],
       consolidate_protocols: Mix.env() != :test
     ]
+  end
+
+  def cli do
+    [preferred_envs: [ci: :test]]
   end
 
   def application do
