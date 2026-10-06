@@ -128,11 +128,11 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
                )
     end
 
-    test "public clients still need no secret, and a stray one is ignored", %{user: user} do
+    test "public clients need no secret, and a presented one is rejected", %{user: user} do
       client = create_client("none")
       {code, verifier} = issue_code(client, user)
 
-      assert {:ok, _} =
+      assert {:error, :unsupported_client_authentication} =
                Token.exchange_authorization_code(
                  MachineServer,
                  code_params(client, code, verifier, %{"client_secret" => "ignored"})
@@ -268,9 +268,8 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
                )
     end
 
-    test "refresh is allowed with only authorization_code (the RFC 7591 default)",
-         %{user: user} do
-      client = create_client("client_secret_post", ["authorization_code"])
+    test "refresh is allowed when the client lists the refresh_token grant", %{user: user} do
+      client = create_client("client_secret_post", ["authorization_code", "refresh_token"])
       {code, verifier} = issue_code(client, user)
 
       {:ok, %{refresh_token: refresh}} =
@@ -329,12 +328,12 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
       assert is_binary(Jason.decode!(conn.resp_body)["refresh_token"])
     end
 
-    test "401 invalid_client without a secret", %{client: client, user: user} do
+    test "invalid_client without a secret", %{client: client, user: user} do
       {code, verifier} = issue_code(client, user)
 
       conn = post_token(code_params(client, code, verifier))
 
-      assert conn.status == 401
+      assert conn.status == 400
       assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
     end
 

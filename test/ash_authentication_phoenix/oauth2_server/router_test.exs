@@ -861,7 +861,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert conn.status == 200
       assert get_resp_header(conn, "cache-control") == ["no-store"]
       assert get_resp_header(conn, "pragma") == ["no-cache"]
-      assert get_resp_header(conn, "content-type") == ["application/json; charset=UTF-8"]
+      assert get_resp_header(conn, "content-type") == ["application/json"]
       body = Jason.decode!(conn.resp_body)
       assert body["token_type"] == "Bearer"
       assert is_binary(body["access_token"])
@@ -914,7 +914,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert is_binary(Jason.decode!(conn.resp_body)["access_token"])
     end
 
-    test "bad secret returns 401 invalid_client without WWW-Authenticate for body auth" do
+    test "bad secret returns 400 invalid_client without WWW-Authenticate for body auth" do
       client = create_machine_client()
 
       conn =
@@ -926,7 +926,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
         |> put_req_header("content-type", "application/x-www-form-urlencoded")
         |> call_machine_protocol()
 
-      assert conn.status == 401
+      assert conn.status == 400
       assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
       assert get_resp_header(conn, "www-authenticate") == []
     end
@@ -943,7 +943,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
 
       assert conn.status == 401
       assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
-      assert get_resp_header(conn, "www-authenticate") == [~s|Basic realm="oauth"|]
+
+      assert get_resp_header(conn, "www-authenticate") == [
+               ~s|Basic realm="https://app.example.com"|
+             ]
     end
 
     test "returns unsupported_grant_type when client_credentials is not configured" do
