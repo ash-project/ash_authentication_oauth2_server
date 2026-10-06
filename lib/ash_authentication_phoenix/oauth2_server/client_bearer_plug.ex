@@ -57,7 +57,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug do
   def init(opts), do: Bearer.init_opts(opts)
 
   @impl Plug
-  def call(conn, opts), do: Bearer.call(conn, opts, &verify_and_load/2)
+  def call(conn, opts), do: Bearer.call(conn, opts, &verify_and_load/3)
 
   defp verify_and_load(server, resource, token) do
     with {:ok, claims} <- Jwt.verify(server, token, resource: resource),

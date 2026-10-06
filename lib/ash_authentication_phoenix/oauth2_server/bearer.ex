@@ -67,7 +67,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Bearer do
   `{:ok, actor, claims}` or `{:error, reason}`.
   """
   @spec call(Plug.Conn.t(), plug_opts(), verify_fun()) :: Plug.Conn.t()
-  def call(conn, %{server: server, resource: resource, required?: required?, scope: scope}, verify_fun) do
+  def call(
+        conn,
+        %{server: server, resource: resource, required?: required?, scope: scope},
+        verify_fun
+      ) do
     case extract_token(conn) do
       :no_token when required? ->
         send_challenge(conn, server, resource, nil, scope)

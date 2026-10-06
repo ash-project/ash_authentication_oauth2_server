@@ -166,23 +166,59 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Errors do
   @spec describe_token_error(atom()) :: {pos_integer(), String.t(), String.t()}
   def describe_token_error(reason) do
     case reason do
-      :reuse -> {400, "invalid_grant", "code or refresh token already used"}
-      :expired -> {400, "invalid_grant", "expired"}
-      :pkce -> {400, "invalid_grant", "PKCE verification failed"}
-      :resource_mismatch -> {400, "invalid_grant", "grant resource is not configured"}
-      :invalid_target -> {400, "invalid_target", "requested resource is not acceptable"}
-      :redirect_mismatch -> {400, "invalid_grant", "redirect_uri mismatch"}
-      :invalid_code -> {400, "invalid_grant", "code not found or invalid"}
-      :invalid_refresh -> {400, "invalid_grant", "refresh token invalid"}
-      :revoked -> {400, "invalid_grant", "refresh token revoked"}
-      :client_mismatch -> {400, "invalid_grant", "client mismatch"}
-      :invalid_client -> {400, "invalid_client", "unknown client"}
-      :unsupported_client_authentication -> {400, "invalid_client", "public client"}
-      :unauthorized_client -> {400, "unauthorized_client", "grant type not registered"}
-      :invalid_scope -> {400, "invalid_scope", "requested scope exceeds the grant"}
-      :invalid_request -> {400, "invalid_request", "missing required parameters"}
-XX {500, "server_error", "could not issue refresh token"}
-      _ -> {500, "server_error", "request could not be processed"}
+      :reuse ->
+        {400, "invalid_grant", "code or refresh token already used"}
+
+      :expired ->
+        {400, "invalid_grant", "expired"}
+
+      :pkce ->
+        {400, "invalid_grant", "PKCE verification failed"}
+
+      :resource_mismatch ->
+        {400, "invalid_grant", "grant resource is not configured"}
+
+      :invalid_target ->
+        {400, "invalid_target", "requested resource is not acceptable"}
+
+      :redirect_mismatch ->
+        {400, "invalid_grant", "redirect_uri mismatch"}
+
+      :invalid_code ->
+        {400, "invalid_grant", "code not found or invalid"}
+
+      :invalid_refresh ->
+        {400, "invalid_grant", "refresh token invalid"}
+
+      :revoked ->
+        {400, "invalid_grant", "refresh token revoked"}
+
+      :client_mismatch ->
+        {400, "invalid_grant", "client mismatch"}
+
+      :invalid_client ->
+        {400, "invalid_client", "unknown client"}
+
+      :unsupported_client_authentication ->
+        {400, "invalid_client", "public client"}
+
+      :unauthorized_client ->
+        {400, "unauthorized_client", "grant type not registered"}
+
+      :invalid_scope ->
+        {400, "invalid_scope", "requested scope exceeds the grant"}
+
+      :invalid_request ->
+        {400, "invalid_request", "missing required parameters"}
+
+      :verify_client_secret_not_configured ->
+        {500, "server_error", "client_credentials is not configured on this server"}
+
+      :refresh_create_failed ->
+        {500, "server_error", "could not issue refresh token"}
+
+      _ ->
+        {500, "server_error", "request could not be processed"}
     end
   end
 

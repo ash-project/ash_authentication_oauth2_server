@@ -173,9 +173,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
               Token.exchange_refresh_token(server, params, opts)
             end
 
-          "client_credentials" -> client_credentials(server, conn, params, opts)
-          type when type in [nil, ""] -> {:error, :invalid_request}
-          _ -> {:error, :unsupported_grant_type}
+          "client_credentials" ->
+            client_credentials(server, conn, params, opts)
+
+          type when type in [nil, ""] ->
+            {:error, :invalid_request}
+
+          _ ->
+            {:error, :unsupported_grant_type}
         end
       end
 
@@ -231,9 +236,19 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   # Disabled when the server has no `verify_client_secret` configured. The
   # credentials come from HTTP Basic or the body; confidential clients may use
   # either (see `Token.exchange_client_credentials/3`).
+  # RFC 6749 §4.4.2: the client credentials request is form-urlencoded. Client
+  # secrets are not accepted in a JSON body.
+  defp require_form_urlencoded(conn) do
+    case get_req_header(conn, "content-type") do
+      ["application/x-www-form-urlencoded" <> _ | _] -> :ok
+      _ -> {:error, :invalid_request}
+    end
+  end
+
   defp client_credentials(server, conn, params, opts) do
     if server.client_credentials_enabled?() do
-      with {:ok, client_id, client_secret, _via} <- ClientAuth.credentials(conn, params) do
+      with :ok <- require_form_urlencoded(conn),
+           {:ok, client_id, client_secret, _via} <- ClientAuth.credentials(conn, params) do
         params = Map.merge(params, %{"client_id" => client_id, "client_secret" => client_secret})
         Token.exchange_client_credentials(server, params, opts)
       end
