@@ -90,15 +90,16 @@ grant, not only this one: if you also give it `authorization_code` /
 `refresh_token`, it must present its secret on those token requests too
 (RFC 6749 §4.1.3 / §6), otherwise the request fails with
 `invalid_client`. The check runs before the code is consumed or the
-refresh token rotated, so a failed attempt doesn't burn either.
+refresh token rotated, so a failed attempt doesn't burn either. The same
+applies to `/oauth/revoke`. Public clients (`none`) must not send a secret
+at all; they get `invalid_client` if they do.
 
 `grant_types` is enforced on every grant. A client that lists only
 `client_credentials` cannot start `/oauth/authorize` or redeem a code
 (`unauthorized_client`), so a machine client can't be used to obtain
-user-delegated tokens. The `refresh_token` grant is allowed when the
-client lists `refresh_token` **or** `authorization_code`, because refresh
-tokens are issued with every code exchange. A `nil` `grant_types` means
-the RFC 7591 default, `["authorization_code"]`.
+user-delegated tokens. A client must list `refresh_token` to get a refresh
+token or to use the refresh grant. A `nil` `grant_types` means the RFC 7591
+default, `["authorization_code"]`.
 
 ## Protecting resource-server routes
 
@@ -123,6 +124,13 @@ pipeline :api do
 end
 ```
 
+If the server protects more than one resource (the `:resources` option),
+name the resource each pipeline guards with `resource: :name` on both
+plugs. The plug then accepts only tokens issued for that resource, and the
+`WWW-Authenticate` challenge points at that resource's metadata. The option
+is required when there is more than one resource, and plug initialisation
+raises without it.
+
 On each request the plug re-loads the client and checks that
 `client_credentials` is still allowed and that the token’s scopes remain
 inside the client’s current allow-list — so stripping a grant or narrowing
@@ -140,6 +148,9 @@ curl -sS -X POST 'https://auth.example.com/oauth/token' \
   -d 'client_secret=CLIENT_SECRET' \
   -d 'scope=my-scope'
 ```
+
+The request must be `application/x-www-form-urlencoded` (RFC 6749 §4.4.2);
+a JSON body is rejected with `invalid_request`.
 
 HTTP Basic (`client_secret_basic` style) — same client row works either
 way:
@@ -171,9 +182,40 @@ A successful response looks like:
 
 There is no refresh token; when it expires the client authenticates again.
 At least one scope is required (request or the client’s default
-allow-list). If you send RFC 8707 `resource`, it must be an absolute URI
-without a fragment and equal this server’s `resource_url`, or the
-endpoint returns `invalid_target`.
+allow-list). Scopes must be offered by the resource the token is for.
+
+### Choosing the resource
+
+A token is bound to one resource (RFC 8707). Send `resource` with the
+resource's URL, an absolute URI without a fragment:
+
+```bash
+  -d 'resource=https://api.example.com/mcp'
+```
+
+- With a single configured resource, `resource` is optional and defaults to
+  it.
+- With several, `resource` is required. Without it the request is
+  ambiguous and fails with `invalid_target`.
+- A value that matches no configured resource, or several different
+  resources in one request, is `invalid_target`. The same resource repeated
+  is accepted.
+- The token's `aud` is the resource's URL. Scopes are checked against that
+  resource's scopes (its `:scopes` entry, or the server's `:scopes` when it
+  has none), so a scope the resource does not offer is `invalid_scope`.
+  When you omit `scope`, the client's whole allow-list is the default, so
+  it must be a subset of that resource's scopes. Otherwise name the
+  scopes you want.
+
+Nothing yet restricts which resources a client may ask for. Any client
+with the grant can request a token for any configured resource, limited
+only by its `scope` allow-list.
+
+### Errors
+
+`invalid_client` is a `400`, or a `401` with a `WWW-Authenticate: Basic`
+challenge when the client authenticated with the `Authorization` header
+(OAuth 2.1 §3.2.4).
 
 ## Security notes (RFC 9700 / RFC 6819)
 
@@ -189,10 +231,11 @@ Aligned with OAuth security BCPs for this grant:
 - **Uniform `invalid_client`** — unknown clients, ineligible grant, and bad
   secrets all map to the same error, with a timing pad on early rejects so
   client-id enumeration is harder (RFC 6819 / RFC 9700).
-- **Audience-bound tokens** — every access token carries `aud` =
-  `resource_url`; resource plugs reject other audiences (RFC 9700 §2.3 /
-  RFC 6819 §5.1.5.5).
-- **Least privilege** — scopes are enforced against the server catalogue and
+- **Audience-bound tokens** — every access token carries `aud` = the URL of
+  the one resource it was issued for; resource plugs reject other audiences,
+  so a token for one resource cannot be replayed at another
+  (RFC 9700 §2.3 / RFC 6819 §5.1.5.5).
+- **Least privilege** — scopes are enforced against the resource's scopes and
   the client allow-list; bearer plugs re-check both on each request
   (RFC 9700 §2.3).
 - **Header-only bearer tokens** — protected-resource metadata advertises
