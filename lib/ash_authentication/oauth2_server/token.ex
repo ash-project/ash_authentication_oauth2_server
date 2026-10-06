@@ -89,6 +89,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
          :ok <- ensure_client_credentials_allowed(client, client_secret),
          :ok <- verify_secret(server, client, client_secret),
          {:ok, resource, audience} <- resolve_resource(server, params, secret_context),
+         :ok <- check_client_resource(client, resource),
          {:ok, scope} <- resolve_client_credentials_scope(server, resource, client, params),
          extra <- server.extra_access_token_claims(client, %{"scope" => scope}, opts),
          {:ok, access_token, _claims} <-
@@ -130,6 +131,22 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   @doc """
+  Whether `client` may request tokens for the named resource.
+
+  A client without an `allowed_resources` list (the attribute is absent, `nil`
+  or empty) may use every configured resource. Otherwise the resource's name
+  must be in the list. Used at token issue and again by `ClientBearerPlug`, so
+  narrowing the list invalidates tokens before they expire.
+  """
+  @spec client_resource_allowed?(Ash.Resource.record(), atom() | String.t() | nil) :: boolean()
+  def client_resource_allowed?(client, resource) do
+    case client |> Map.get(:allowed_resources) |> List.wrap() do
+      [] -> true
+      allowed -> not is_nil(resource) and to_string(resource) in allowed
+    end
+  end
+
+  @doc """
   Whether a minted access-token scope string is still allowed for `client`
   against the server's current catalogue and the client's allow-list.
 
@@ -153,6 +170,10 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   def machine_scopes_allowed?(_, _, _, _), do: false
+
+  defp check_client_resource(client, resource) do
+    if client_resource_allowed?(client, resource), do: :ok, else: {:error, :invalid_target}
+  end
 
   defp client_credentials_from_params(%{"client_id" => id, "client_secret" => secret})
        when is_binary(id) and id != "" and is_binary(secret) and secret != "" do

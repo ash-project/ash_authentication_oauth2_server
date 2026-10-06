@@ -64,6 +64,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug do
          :ok <- ensure_machine_token(claims),
          {:ok, client} <- load_client(server, claims),
          :ok <- ensure_still_eligible(client),
+         :ok <- ensure_resource_still_allowed(server, resource, client),
          :ok <- ensure_scopes_still_allowed(server, resource, client, claims) do
       {:ok, client, claims}
     end
@@ -91,6 +92,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug do
     else
       {:error, :client_not_eligible}
     end
+  end
+
+  # Narrowing `allowed_resources` on the client row takes effect before the
+  # JWT expires. Without `:resource` the plug guards the only resource.
+  defp ensure_resource_still_allowed(server, resource, client) do
+    name = resource || server.resources() |> List.first()
+
+    if Token.client_resource_allowed?(client, name),
+      do: :ok,
+      else: {:error, :resource_not_allowed}
   end
 
   defp ensure_scopes_still_allowed(server, resource, client, %{"scope" => scope}) do

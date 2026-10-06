@@ -38,6 +38,7 @@ defmodule Oauth2ServerTest.OAuthClient do
     attribute :token_endpoint_auth_method, :string, public?: true, default: "none"
     attribute :scope, :string, public?: true, default: "mcp"
     attribute :client_secret_hash, :string, public?: true
+    attribute :allowed_resources, {:array, :string}, public?: true
     attribute :cimd_url, :string, public?: true
     attribute :last_used_at, :utc_datetime_usec, public?: true
     create_timestamp :inserted_at
@@ -48,7 +49,14 @@ defmodule Oauth2ServerTest.OAuthClient do
     defaults [:read, :destroy]
 
     update :update do
-      accept [:grant_types, :token_endpoint_auth_method, :scope, :client_secret_hash]
+      accept [
+        :grant_types,
+        :token_endpoint_auth_method,
+        :scope,
+        :client_secret_hash,
+        :allowed_resources
+      ]
+
       require_atomic? false
     end
 
@@ -71,7 +79,8 @@ defmodule Oauth2ServerTest.OAuthClient do
         :response_types,
         :token_endpoint_auth_method,
         :scope,
-        :client_secret_hash
+        :client_secret_hash,
+        :allowed_resources
       ]
     end
 

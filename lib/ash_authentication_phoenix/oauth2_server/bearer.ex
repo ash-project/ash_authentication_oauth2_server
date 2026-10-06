@@ -156,6 +156,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Bearer do
       :not_person_token -> {"invalid_token", "not a user access token"}
       :client_not_found -> {"invalid_token", "client not found"}
       :client_not_eligible -> {"invalid_token", "client credentials no longer allowed"}
+      :resource_not_allowed -> {"invalid_token", "client no longer allowed this resource"}
       :scopes_no_longer_allowed -> {"invalid_token", "token scopes no longer allowed"}
       :not_machine_token -> {"invalid_token", "not a client credentials token"}
       _ -> {"invalid_token", nil}

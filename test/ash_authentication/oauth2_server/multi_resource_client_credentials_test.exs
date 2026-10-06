@@ -106,6 +106,45 @@ defmodule AshAuthentication.Oauth2Server.MultiResourceClientCredentialsTest do
     end
   end
 
+  describe "allowed_resources" do
+    defp restrict(client, resources) do
+      client
+      |> Ash.Changeset.for_update(:update, %{allowed_resources: resources},
+        domain: Domain,
+        context: %{private: %{ash_authentication?: true}}
+      )
+      |> Ash.update!()
+    end
+
+    test "is unrestricted without a list", %{client: client} do
+      assert Token.client_resource_allowed?(client, :mcp)
+      assert Token.client_resource_allowed?(client, :gql)
+      assert Token.client_resource_allowed?(restrict(client, []), :gql)
+    end
+
+    test "limits the client to the listed resources", %{client: client} do
+      restrict(client, ["mcp"])
+
+      assert {:ok, _} = issue(client, %{"resource" => @mcp, "scope" => "mcp"})
+
+      assert {:error, :invalid_target} =
+               issue(client, %{"resource" => @gql, "scope" => "gql"})
+    end
+
+    test "the plug rejects a token once the resource is no longer allowed", %{client: client} do
+      {:ok, %{access_token: token}} = issue(client, %{"resource" => @gql, "scope" => "gql"})
+      refute call_plug(token, :gql).halted
+
+      restrict(client, ["mcp"])
+
+      conn = call_plug(token, :gql)
+      assert conn.halted
+      assert conn.status == 401
+      [challenge] = Plug.Conn.get_resp_header(conn, "www-authenticate")
+      assert challenge =~ "no longer allowed this resource"
+    end
+  end
+
   describe "ClientBearerPlug" do
     setup %{client: client} do
       {:ok, %{access_token: mcp_token}} =
