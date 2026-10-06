@@ -82,6 +82,20 @@ defmodule AshAuthentication.Oauth2Server.ClientMetadata do
   end
 
   @doc """
+  The grant types a stored client row is allowed to use.
+
+  A `nil` `grant_types` attribute means the RFC 7591 §2 default,
+  `["authorization_code"]`. An explicit empty list means no grants.
+  """
+  @spec allowed_grant_types(map()) :: [String.t()]
+  def allowed_grant_types(client) do
+    case Map.get(client, :grant_types) do
+      nil -> ["authorization_code"]
+      grants -> List.wrap(grants)
+    end
+  end
+
+  @doc """
   Validate `response_types` when present — `code` only.
   """
   @spec validate_response_types(map()) :: :ok | {:error, String.t(), String.t()}
