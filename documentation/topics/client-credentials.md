@@ -207,9 +207,20 @@ resource's URL, an absolute URI without a fragment:
   it must be a subset of that resource's scopes. Otherwise name the
   scopes you want.
 
-Nothing yet restricts which resources a client may ask for. Any client
-with the grant can request a token for any configured resource, limited
-only by its `scope` allow-list.
+By default a client may ask for any configured resource, limited only by
+its `scope` allow-list. To restrict a machine client to some resources, give
+the client resource an optional `allowed_resources` string array attribute
+(the installer adds it) and list the resource names:
+
+```elixir
+allowed_resources: ["mcp"]
+```
+
+A request for another resource is `invalid_target`. A client with no list
+(`nil` or empty) is unrestricted. `ClientBearerPlug` re-checks the list on
+every request, so removing a resource from it also stops tokens that were
+already issued. Add the attribute to older client resources yourself and
+accept it on your create and update actions.
 
 ### Errors
 
