@@ -68,6 +68,28 @@ With CIMD on, the RFC 8414 metadata document advertises
 `client_id_metadata_document_supported: true`, which is how clients
 discover they can skip registration.
 
+## Token endpoint authentication methods
+
+This server supports public clients with PKCE (`none`). A CIMD document can
+advertise several methods using `token_endpoint_auth_methods_supported`, for
+example ChatGPT's metadata:
+
+```json
+{
+  "token_endpoint_auth_method": "private_key_jwt",
+  "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"]
+}
+```
+
+The server selects `none` from the intersection of the client's advertised
+methods and the server's supported methods, and stores that selected method.
+The singular field expresses a preference; an unsupported preference does not
+reject a client that explicitly supports `none`. If the capability list is
+absent, the singular field retains its existing meaning and defaults to `none`.
+An empty or malformed list, or a list without a common method, is rejected.
+Clients requiring only `private_key_jwt` remain unsupported. Dynamic client
+registration continues to validate its requested singular method directly.
+
 ## How it works
 
 * **Authorize** — a URL-shaped `client_id` triggers a fetch (through an
