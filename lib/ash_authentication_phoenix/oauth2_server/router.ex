@@ -93,10 +93,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
 
   A custom router can delegate protocol handling back to
   `AshAuthentication.Phoenix.Oauth2Server.ConsentRouter.prepare/2` and
-  `AshAuthentication.Phoenix.Oauth2Server.ConsentRouter.complete/3`.
+  `AshAuthentication.Phoenix.Oauth2Server.ConsentRouter.complete/4`.
   Preparation validates the request and browser context without deciding or
-  granting consent. Completion renders the configured view or finishes the
-  application's decision with session renewal and OAuth responses.
+  granting consent. Completion accepts `:consent_view` in its separate options
+  for rendering or finishes the application's decision with session renewal
+  and OAuth responses.
 
   Application authorization and atomic persistence of application grants plus
   OAuth consent remain application-owned. Keep session loading and CSRF

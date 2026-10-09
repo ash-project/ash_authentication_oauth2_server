@@ -13,7 +13,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
 
   See `AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter` for the
   client-facing protocol endpoints (token, register, metadata). Custom consent
-  routers can reuse `prepare/2` and `complete/3` for protocol handling while
+  routers can reuse `prepare/2` and `complete/4` for protocol handling while
   owning their UI, application authorization and consent transaction.
 
   ## Options
@@ -37,7 +37,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   Validated request and browser context returned by `prepare/2`.
 
   Application grant operations use `server`, `user`, `validated` and
-  `tenant_opts`. Keep this request unchanged when passing it to `complete/3`.
+  `tenant_opts`. Keep this request unchanged when passing it to `complete/4`.
   `action` is the validated POST button value, or nil for GET.
   """
   @type request :: %{
@@ -47,12 +47,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
           tenant: term(),
           tenant_opts: Authorize.opts(),
           method: String.t(),
-          action: String.t() | nil,
-          consent_view: module()
+          action: String.t() | nil
         }
 
   @typedoc """
-  Application decision passed to `complete/3` after preparation.
+  Application decision passed to `complete/4` after preparation.
 
   Approval means consent and any application grants have already committed.
   Rendering accepts extra view assigns, but cannot override protocol fields.
@@ -71,7 +70,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   plug :dispatch
 
   get "/" do
-    case prepare(conn, conn.assigns.oauth2_server_router_opts) do
+    opts = conn.assigns.oauth2_server_router_opts
+
+    case prepare(conn, opts) do
       {:ok, conn, request} ->
         if Authorize.consented?(
              request.server,
@@ -82,7 +83,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
            ) do
           complete(conn, request, :approved)
         else
-          complete(conn, request, {:render, %{}})
+          complete(conn, request, {:render, %{}}, opts)
         end
 
       {:halt, conn} ->
@@ -118,12 +119,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   @doc """
   Prepare a GET or POST consent request for application-owned handling.
 
-  `opts` accepts the same `:oauth2_server` and `:consent_view` options as this
-  router. Parses URL-encoded requests with the default parser limits, checks
-  GET state size, verifies and reconstructs sealed POST protocol fields, and
-  validates the request with the browser connection's current Ash tenant.
-  Requires its authenticated actor and an approve or deny action on POST.
-  Session loading and CSRF protection remain in the outer browser pipeline.
+  `opts` requires the `:oauth2_server` configuration module. Parses URL-encoded
+  requests with the default parser limits, checks GET state size, verifies and
+  reconstructs sealed POST protocol fields, and validates the request with the
+  browser connection's current Ash tenant. Requires its authenticated actor
+  and an approve or deny action on POST. Session loading and CSRF protection
+  remain in the outer browser pipeline.
 
   Returns `{:ok, conn, request}` without rendering, checking prior consent,
   persisting grants or issuing a code. Returns `{:halt, conn}` after responding
@@ -139,7 +140,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
 
     case request_params(conn, server) do
       {:ok, params} ->
-        prepare_request(conn, server, params, opts)
+        prepare_request(conn, server, params)
 
       {:error, :state_too_large} ->
         {:halt, bad_state_html(conn)}
@@ -172,30 +173,36 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     * `{:error, code, description}` to return an application OAuth error.
       The description is omitted when nil or empty.
 
+  `opts` accepts `:consent_view` for rendering. It defaults to
+  `AshAuthentication.Phoenix.Oauth2Server.ConsentView`. Rendering options are
+  separate from the prepared request and ignored for other decisions.
+
   Returns a halted connection. This function does not persist consent or
   application grants. Code-creation failures propagate and do not roll back
   previously committed grants. Invalid decisions, including approving a denied
   POST, raise `ArgumentError`. This is opt-in reuse, not a sandbox for custom
   Plug code or a replacement for application authorization.
   """
-  @spec complete(Plug.Conn.t(), request(), decision()) :: Plug.Conn.t()
-  def complete(conn, request, {:render, assigns}) when is_map(assigns) do
-    render_consent(conn, request, assigns)
+  @spec complete(Plug.Conn.t(), request(), decision(), keyword()) :: Plug.Conn.t()
+  def complete(conn, request, decision, opts \\ [])
+
+  def complete(conn, request, {:render, assigns}, opts) when is_map(assigns) do
+    render_consent(conn, request, assigns, opts)
   end
 
-  def complete(conn, %{method: "POST", action: "approve"} = request, :approved) do
+  def complete(conn, %{method: "POST", action: "approve"} = request, :approved, _opts) do
     conn |> rotate_session() |> issue_code_redirect(request)
   end
 
-  def complete(conn, %{method: "GET"} = request, :approved) do
+  def complete(conn, %{method: "GET"} = request, :approved, _opts) do
     issue_code_redirect(conn, request)
   end
 
-  def complete(conn, request, :denied) do
-    complete(conn, request, {:error, "access_denied", nil})
+  def complete(conn, request, :denied, opts) do
+    complete(conn, request, {:error, "access_denied", nil}, opts)
   end
 
-  def complete(conn, request, {:error, code, description})
+  def complete(conn, request, {:error, code, description}, _opts)
       when is_binary(code) and (is_binary(description) or is_nil(description)) do
     conn = Ash.PlugHelpers.set_tenant(conn, request.tenant)
 
@@ -209,7 +216,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     )
   end
 
-  def complete(_conn, _request, _decision) do
+  def complete(_conn, _request, _decision, _opts) do
     raise ArgumentError, "invalid consent completion decision"
   end
 
@@ -221,7 +228,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
     verify_consent_request(server, Map.get(conn.params, "consent_request"))
   end
 
-  defp prepare_request(conn, server, params, opts) do
+  defp prepare_request(conn, server, params) do
     tenant_opts = tenant_opts(conn)
 
     with {:ok, validated} <- Authorize.validate_request(server, params, tenant_opts),
@@ -235,8 +242,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
          tenant: Ash.PlugHelpers.get_tenant(conn),
          tenant_opts: tenant_opts,
          method: conn.method,
-         action: if(conn.method == "POST", do: Map.get(conn.params, "action")),
-         consent_view: consent_view!(opts)
+         action: if(conn.method == "POST", do: Map.get(conn.params, "action"))
        }}
     else
       {:error, :no_user} ->
@@ -375,8 +381,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
   defp rotate_session(conn), do: Plug.Conn.configure_session(conn, renew: true)
 
   # sobelow_skip ["XSS.SendResp"]
-  defp render_consent(conn, request, extra_assigns) do
+  defp render_consent(conn, request, extra_assigns, opts) do
     validated = request.validated
+    view = consent_view!(opts)
 
     assigns =
       Map.merge(extra_assigns, %{
@@ -394,7 +401,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
         tenant: request.tenant
       })
 
-    body = request.consent_view.render(:consent, assigns) |> IO.iodata_to_binary()
+    body = view.render(:consent, assigns) |> IO.iodata_to_binary()
 
     conn
     |> put_resp_header("content-type", "text/html; charset=utf-8")

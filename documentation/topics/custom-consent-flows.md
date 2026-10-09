@@ -70,7 +70,7 @@ defmodule MyAppWeb.ConsentRouter do
     case ConsentRouter.prepare(conn, conn.assigns.consent_opts) do
       {:ok, conn, request} ->
         # The default renderer supplies sealed OAuth fields and the CSRF token.
-        ConsentRouter.complete(conn, request, {:render, %{}})
+        ConsentRouter.complete(conn, request, {:render, %{}}, conn.assigns.consent_opts)
 
       {:halt, conn} ->
         conn
