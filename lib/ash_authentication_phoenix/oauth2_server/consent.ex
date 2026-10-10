@@ -110,7 +110,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Consent do
       reuses existing grants and does not renew the session.
     * `:denied` to redirect with `access_denied` without granting or renewing.
     * `{:error, code, description}` to return an application OAuth error.
-      The description is omitted when nil or empty.
+      `code` must be one of `invalid_request`, `unauthorized_client`,
+      `access_denied`, `unsupported_response_type`, `invalid_scope`,
+      `server_error` or `temporarily_unavailable`, as defined by
+      [RFC 6749 §4.1.2.1](https://www.rfc-editor.org/rfc/rfc6749.html#section-4.1.2.1).
+      `description` may contain only printable ASCII characters, excluding
+      double quotes and backslashes. It is omitted when nil or empty.
 
   `opts` accepts `:consent_view` for rendering. It defaults to
   `AshAuthentication.Phoenix.Oauth2Server.ConsentView`. Rendering options are
