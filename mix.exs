@@ -78,7 +78,8 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
       extras: [
         {"README.md", title: "Home"},
         "documentation/topics/scopes.md",
-        "documentation/topics/client-id-metadata-documents.md"
+        "documentation/topics/client-id-metadata-documents.md",
+        "documentation/topics/custom-consent-flows.md"
       ],
       groups_for_extras: [
         Topics: ~r'documentation/topics'
@@ -137,7 +138,7 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
 
   defp deps do
     [
-      {:ash, "~> 3.0"},
+      {:ash, "~> 3.0 and >= 3.34.6"},
       {:ash_authentication, "~> 5.0-rc"},
       {:phoenix, "~> 1.6"},
       {:plug, "~> 1.14"},

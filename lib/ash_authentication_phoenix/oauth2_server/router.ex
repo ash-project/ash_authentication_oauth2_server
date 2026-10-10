@@ -30,7 +30,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
   The two macros forward to:
 
     * `AshAuthentication.Phoenix.Oauth2Server.ConsentRouter` — handles
-      `/oauth/authorize` (the user-driven consent step).
+      `/oauth/authorize` (the user-driven consent step), unless replaced
+      with the `:consent_router` option.
     * `AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter` — handles
       `/oauth/register`, `/oauth/token`, `/oauth/revoke`, and the three
       metadata documents under `/.well-known`.
@@ -67,8 +68,41 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
 
     * `:oauth2_server` (required) — your `Oauth2Server` config module.
     * `:path` — base path. Defaults to `/oauth/authorize`.
+    * `:consent_router` — a module implementing the standard `Plug` behaviour.
+      Defaults to `AshAuthentication.Phoenix.Oauth2Server.ConsentRouter`.
+      See [Custom consent flows](custom-consent-flows.md) for a worked router example.
     * `:consent_view` — module exposing `render(:consent, assigns)`.
       Defaults to `AshAuthentication.Phoenix.Oauth2Server.ConsentView`.
+
+  Set `:consent_router` when your application needs to own the complete consent
+  flow, including GET and POST handling:
+
+      scope "/" do
+        pipe_through :browser
+
+        oauth2_server_consent_routes(
+          oauth2_server: MyApp.Oauth2Server,
+          consent_router: MyAppWeb.ConsentRouter
+        )
+      end
+
+  A replacement router receives `:oauth2_server` and `:consent_view` through
+  `init/1`. Phoenix strips the mounted path prefix, so the default GET and POST
+  handlers match `/`. Custom router failures propagate. They do not fall back
+  to the default.
+
+  A custom router can reuse protocol handling through
+  `AshAuthentication.Phoenix.Oauth2Server.Consent.prepare/2` and
+  `AshAuthentication.Phoenix.Oauth2Server.Consent.complete/4`.
+  Preparation validates the request and browser context without deciding or
+  granting consent. Completion accepts `:consent_view` in its separate options
+  for rendering or finishes the application's decision with session renewal
+  and OAuth responses.
+
+  Application authorization and atomic persistence of application grants plus
+  OAuth consent remain application-owned. Keep session loading and CSRF
+  protection in the outer browser pipeline. See the worked guide and each
+  operation's documentation for the hand-back contract.
   """
   defmacro oauth2_server_consent_routes(opts \\ []) when is_list(opts) do
     quote location: :keep do
@@ -79,8 +113,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
       consent_view =
         Keyword.get(opts, :consent_view, AshAuthentication.Phoenix.Oauth2Server.ConsentView)
 
+      consent_router =
+        Keyword.get(opts, :consent_router, AshAuthentication.Phoenix.Oauth2Server.ConsentRouter)
+
       scope "/", alias: false do
-        forward path, AshAuthentication.Phoenix.Oauth2Server.ConsentRouter,
+        forward path, consent_router,
           oauth2_server: server,
           consent_view: consent_view
       end

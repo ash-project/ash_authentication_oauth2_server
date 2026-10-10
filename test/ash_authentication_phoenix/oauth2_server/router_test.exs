@@ -31,6 +31,39 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
     User
   }
 
+  defmodule CustomConsentPlug do
+    @behaviour Plug
+
+    @impl true
+    def init(opts), do: Map.new(opts)
+
+    @impl true
+    def call(conn, opts) do
+      if get_req_header(conn, "x-test-fail") == ["true"] do
+        raise "custom consent failed"
+      end
+
+      send(
+        self(),
+        {:custom_consent_called, opts, Ash.PlugHelpers.get_actor(conn),
+         Ash.PlugHelpers.get_tenant(conn)}
+      )
+
+      body =
+        Jason.encode!(%{
+          method: conn.method,
+          path_info: conn.path_info,
+          csrf_token: Plug.CSRFProtection.get_csrf_token()
+        })
+
+      conn |> send_resp(202, body) |> halt()
+    end
+  end
+
+  defmodule CustomConsentView do
+    def render(:consent, assigns), do: "custom consent at " <> assigns.action_path
+  end
+
   @consent_opts ConsentRouter.init(oauth2_server: Server)
   @protocol_opts ProtocolRouter.init(oauth2_server: Server)
 
@@ -40,6 +73,29 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
   defmodule PhoenixRouterFixture do
     use Phoenix.Router
     use AshAuthentication.Phoenix.Oauth2Server.Router
+
+    pipeline :browser do
+      plug :fetch_session
+      plug :protect_from_forgery
+    end
+
+    scope "/" do
+      pipe_through :browser
+      oauth2_server_consent_routes(oauth2_server: Oauth2ServerTest.Server)
+
+      oauth2_server_consent_routes(
+        oauth2_server: Oauth2ServerTest.Server,
+        path: "/custom/authorize",
+        consent_router: AshAuthentication.Phoenix.Oauth2Server.RouterTest.CustomConsentPlug,
+        consent_view: AshAuthentication.Phoenix.Oauth2Server.RouterTest.CustomConsentView
+      )
+
+      oauth2_server_consent_routes(
+        oauth2_server: Oauth2ServerTest.Server,
+        path: "/view/authorize",
+        consent_view: AshAuthentication.Phoenix.Oauth2Server.RouterTest.CustomConsentView
+      )
+    end
 
     oauth2_server_protocol_routes(oauth2_server: Oauth2ServerTest.Server)
   end
@@ -84,6 +140,309 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
   defp pkce do
     verifier = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
     {verifier, PKCE.challenge(verifier)}
+  end
+
+  describe "Router: configurable consent router" do
+    test "uses the existing consent router by default", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+
+      conn =
+        conn(
+          :get,
+          "/oauth/authorize?" <>
+            URI.encode_query(authorize_query(client_id, redirect_uri, challenge))
+        )
+        |> init_test_session(%{})
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_router()
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "content-type") == ["text/html; charset=utf-8"]
+      assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+      refute_received {:custom_consent_called, _, _, _}
+    end
+
+    test "default POST ignores raw OAuth fields and renews the session", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+
+      get_conn =
+        conn(
+          :get,
+          "/oauth/authorize?" <>
+            URI.encode_query(authorize_query(client_id, redirect_uri, challenge))
+        )
+        |> init_test_session(%{})
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_router()
+
+      [_, request_token] =
+        Regex.run(~r/name="consent_request" value="([^"]+)"/, get_conn.resp_body)
+
+      [_, csrf_token] = Regex.run(~r/name="_csrf_token" value="([^"]+)"/, get_conn.resp_body)
+
+      post_conn =
+        conn(:post, "/oauth/authorize", %{
+          "consent_request" => request_token,
+          "_csrf_token" => csrf_token,
+          "action" => "approve",
+          "scope" => "unapproved-scope",
+          "client_id" => "unapproved-client",
+          "redirect_uri" => "https://other.example.com/cb"
+        })
+        |> init_test_session(%{"_csrf_token" => get_session(get_conn, "_csrf_token")})
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_router()
+
+      assert post_conn.status == 302
+      assert post_conn.private.plug_session_info == :renew
+      assert {:ok, [code]} = Ash.read(OAuthAuthorizationCode)
+      assert code.client_id == client_id
+      assert code.scope == "mcp"
+      assert {:ok, [_]} = Ash.read(OAuthConsent)
+      [location] = get_resp_header(post_conn, "location")
+      assert String.starts_with?(location, redirect_uri <> "?")
+    end
+
+    test "default GET reuses prior consent without renewing the session", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+
+      consent =
+        OAuthConsent
+        |> Ash.Changeset.for_create(:grant, %{
+          user_id: user.id,
+          client_id: client_id,
+          scope: "mcp"
+        })
+        |> Ash.create!()
+
+      conn =
+        conn(
+          :get,
+          "/oauth/authorize?" <>
+            URI.encode_query(authorize_query(client_id, redirect_uri, challenge))
+        )
+        |> init_test_session(%{})
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_router()
+
+      assert conn.status == 302
+      assert conn.halted
+      refute Map.get(conn.private, :plug_session_info) == :renew
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri <> "?")
+      query = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert {:ok, [code]} = Ash.read(OAuthAuthorizationCode)
+      assert query == %{"code" => code.id, "state" => "csrf-state", "iss" => Server.issuer_url()}
+      assert code.client_id == client_id
+      assert code.user_id == user.id
+      assert code.code_challenge == challenge
+      assert {:ok, [stored_consent]} = Ash.read(OAuthConsent)
+      assert stored_consent.id == consent.id
+    end
+
+    test "default denial redirects without granting consent or issuing a code", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+      {form, session} = obtain_default_consent_form(user, client_id, redirect_uri, challenge)
+
+      conn =
+        conn(:post, "/oauth/authorize", Map.put(form, "action", "deny"))
+        |> init_test_session(session)
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_router()
+
+      assert conn.status == 302
+      assert conn.halted
+      refute Map.get(conn.private, :plug_session_info) == :renew
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri <> "?")
+
+      assert location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query() == %{
+               "error" => "access_denied",
+               "state" => "csrf-state",
+               "iss" => Server.issuer_url()
+             }
+
+      assert {:ok, []} = Ash.read(OAuthAuthorizationCode)
+      assert {:ok, []} = Ash.read(OAuthConsent)
+    end
+
+    test "default POST rejects missing and tampered consent-request tokens", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+      {form, session} = obtain_default_consent_form(user, client_id, redirect_uri, challenge)
+
+      for invalid_form <- [
+            Map.delete(form, "consent_request"),
+            Map.put(form, "consent_request", form["consent_request"] <> "tampered")
+          ] do
+        conn =
+          conn(:post, "/oauth/authorize", Map.put(invalid_form, "action", "approve"))
+          |> init_test_session(session)
+          |> Ash.PlugHelpers.set_actor(user)
+          |> call_router()
+
+        assert conn.status == 400
+        assert conn.halted
+        assert get_resp_header(conn, "location") == []
+        assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+        assert {:ok, []} = Ash.read(OAuthAuthorizationCode)
+        assert {:ok, []} = Ash.read(OAuthConsent)
+      end
+    end
+
+    test "default GET and POST require an authenticated actor", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+      {form, session} = obtain_default_consent_form(user, client_id, redirect_uri, challenge)
+
+      for request <- [
+            conn(
+              :get,
+              "/oauth/authorize?" <>
+                URI.encode_query(authorize_query(client_id, redirect_uri, challenge))
+            ),
+            conn(:post, "/oauth/authorize", Map.put(form, "action", "approve"))
+          ] do
+        conn = request |> init_test_session(session) |> call_router()
+
+        assert conn.status == 401
+        assert conn.halted
+        assert get_resp_header(conn, "location") == []
+        assert {:ok, []} = Ash.read(OAuthAuthorizationCode)
+        assert {:ok, []} = Ash.read(OAuthConsent)
+      end
+    end
+
+    test "default POST remains behind the browser CSRF pipeline", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+      {form, session} = obtain_default_consent_form(user, client_id, redirect_uri, challenge)
+
+      error =
+        assert_raise Plug.Conn.WrapperError, fn ->
+          conn(
+            :post,
+            "/oauth/authorize",
+            form |> Map.delete("_csrf_token") |> Map.put("action", "approve")
+          )
+          |> init_test_session(session)
+          |> Ash.PlugHelpers.set_actor(user)
+          |> call_router()
+        end
+
+      assert %Plug.CSRFProtection.InvalidCSRFTokenError{} = error.reason
+      assert {:ok, []} = Ash.read(OAuthAuthorizationCode)
+      assert {:ok, []} = Ash.read(OAuthConsent)
+    end
+
+    test "forwards initialized options, actor, tenant, and stripped path to a custom Plug", %{
+      user: user
+    } do
+      conn =
+        conn(:get, "/custom/authorize")
+        |> init_test_session(%{})
+        |> Ash.PlugHelpers.set_actor(user)
+        |> Ash.PlugHelpers.set_tenant("tenant-a")
+        |> call_router()
+
+      assert conn.status == 202
+      assert conn.halted
+      assert Jason.decode!(conn.resp_body)["path_info"] == []
+
+      assert_received {:custom_consent_called,
+                       %{oauth2_server: Server, consent_view: CustomConsentView}, ^user,
+                       "tenant-a"}
+
+      assert {:ok, []} = Ash.read(OAuthAuthorizationCode)
+    end
+
+    test "custom POST remains behind the browser CSRF pipeline" do
+      get_conn =
+        conn(:get, "/custom/authorize")
+        |> init_test_session(%{})
+        |> call_router()
+
+      token = Jason.decode!(get_conn.resp_body)["csrf_token"]
+      session = %{"_csrf_token" => get_session(get_conn, "_csrf_token")}
+
+      post_conn =
+        conn(:post, "/custom/authorize", %{"_csrf_token" => token})
+        |> init_test_session(session)
+        |> call_router()
+
+      assert post_conn.status == 202
+      assert Jason.decode!(post_conn.resp_body)["method"] == "POST"
+
+      error =
+        assert_raise Plug.Conn.WrapperError, fn ->
+          conn(:post, "/custom/authorize", %{})
+          |> init_test_session(session)
+          |> call_router()
+        end
+
+      assert %Plug.CSRFProtection.InvalidCSRFTokenError{} = error.reason
+    end
+
+    test "does not fall back to the default router when a custom router fails" do
+      error =
+        assert_raise Plug.Conn.WrapperError, fn ->
+          conn(:get, "/custom/authorize")
+          |> init_test_session(%{})
+          |> put_req_header("x-test-fail", "true")
+          |> call_router()
+        end
+
+      assert %RuntimeError{message: "custom consent failed"} = error.reason
+      assert {:ok, []} = Ash.read(OAuthAuthorizationCode)
+    end
+
+    test "preserves the existing custom path and consent view options", %{user: user} do
+      {client_id, redirect_uri} = create_client_for_authorize()
+      {_verifier, challenge} = pkce()
+
+      conn =
+        conn(
+          :get,
+          "/view/authorize?" <>
+            URI.encode_query(authorize_query(client_id, redirect_uri, challenge))
+        )
+        |> init_test_session(%{})
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_router()
+
+      assert conn.status == 200
+      assert conn.resp_body == "custom consent at /view/authorize"
+    end
+
+    test "default mount preserves optional state and the single callback's existing query", %{
+      user: user
+    } do
+      registered = "https://chat.example.com/cb?app=1"
+      {client_id, _} = create_client_for_authorize(registered)
+      {_verifier, challenge} = pkce()
+      Authorize.grant_consent!(Server, user, Ash.get!(OAuthClient, client_id), "mcp")
+
+      params =
+        authorize_query(client_id, registered, challenge) |> Map.drop(["state", "redirect_uri"])
+
+      conn =
+        conn(:get, "/oauth/authorize?" <> URI.encode_query(params))
+        |> init_test_session(%{})
+        |> Ash.PlugHelpers.set_actor(user)
+        |> call_router()
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, registered <> "&")
+      query = URI.decode_query(URI.parse(location).query)
+      assert query["app"] == "1"
+      assert is_binary(query["code"])
+      refute Map.has_key?(query, "state")
+    end
   end
 
   describe "ProtocolRouter: GET /oauth-authorization-server" do
@@ -863,6 +1222,25 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       "state" => "csrf-state",
       "resource" => Server.resource_url()
     }
+  end
+
+  defp obtain_default_consent_form(user, client_id, redirect_uri, challenge) do
+    conn =
+      conn(
+        :get,
+        "/oauth/authorize?" <>
+          URI.encode_query(authorize_query(client_id, redirect_uri, challenge))
+      )
+      |> init_test_session(%{})
+      |> Ash.PlugHelpers.set_actor(user)
+      |> call_router()
+
+    assert conn.status == 200
+    [_, request_token] = Regex.run(~r/name="consent_request" value="([^"]+)"/, conn.resp_body)
+    [_, csrf_token] = Regex.run(~r/name="_csrf_token" value="([^"]+)"/, conn.resp_body)
+
+    {%{"consent_request" => request_token, "_csrf_token" => csrf_token},
+     %{"_csrf_token" => get_session(conn, "_csrf_token")}}
   end
 
   # Walks the GET /authorize → consent screen → extracts the sealed
