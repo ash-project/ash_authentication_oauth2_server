@@ -13,8 +13,9 @@ OAuth consent.
 
 A replacement is a standard Plug. The mounting macro forwards `:oauth2_server`
 and `:consent_view` through `init/1`, with the mounted prefix stripped before
-matching. It can delegate request preparation and response handling back to the
-default router without implementing the individual protocol steps itself.
+matching. It can reuse
+`AshAuthentication.Phoenix.Oauth2Server.Consent` for request preparation and
+response handling without implementing the individual protocol steps itself.
 
 ```elixir
 scope "/" do
@@ -61,16 +62,16 @@ any growing selection lists in your application.
 defmodule MyAppWeb.ConsentRouter do
   use Plug.Router, copy_opts_to_assign: :consent_opts
 
-  alias AshAuthentication.Phoenix.Oauth2Server.ConsentRouter
+  alias AshAuthentication.Phoenix.Oauth2Server.Consent
 
   plug :match
   plug :dispatch
 
   get "/" do
-    case ConsentRouter.prepare(conn, conn.assigns.consent_opts) do
+    case Consent.prepare(conn, conn.assigns.consent_opts) do
       {:ok, conn, request} ->
         # The default renderer supplies sealed OAuth fields and the CSRF token.
-        ConsentRouter.complete(conn, request, {:render, %{}}, conn.assigns.consent_opts)
+        Consent.complete(conn, request, {:render, %{}}, conn.assigns.consent_opts)
 
       {:halt, conn} ->
         conn
@@ -79,12 +80,12 @@ defmodule MyAppWeb.ConsentRouter do
 
   post "/" do
     # Preparation verifies the sealed request and validates it with this tenant.
-    case ConsentRouter.prepare(conn, conn.assigns.consent_opts) do
+    case Consent.prepare(conn, conn.assigns.consent_opts) do
       {:ok, conn, %{action: "approve"} = request} ->
         approve(conn, request)
 
       {:ok, conn, request} ->
-        ConsentRouter.complete(conn, request, :denied)
+        Consent.complete(conn, request, :denied)
 
       {:halt, conn} ->
         conn
@@ -107,13 +108,13 @@ defmodule MyAppWeb.ConsentRouter do
       :ok ->
         # Completion renews the session and issues a code without rewriting consent.
         # Code issuance failures do not roll back the committed grants.
-        ConsentRouter.complete(conn, request, :approved)
+        Consent.complete(conn, request, :approved)
 
       {:error, :forbidden} ->
-        ConsentRouter.complete(conn, request, {:error, "access_denied", "Access not permitted"})
+        Consent.complete(conn, request, {:error, "access_denied", "Access not permitted"})
 
       {:error, :failed} ->
-        ConsentRouter.complete(
+        Consent.complete(
           conn,
           request,
           {:error, "server_error", "Consent could not be saved"}

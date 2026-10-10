@@ -91,9 +91,9 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
   handlers match `/`. Custom router failures propagate. They do not fall back
   to the default.
 
-  A custom router can delegate protocol handling back to
-  `AshAuthentication.Phoenix.Oauth2Server.ConsentRouter.prepare/2` and
-  `AshAuthentication.Phoenix.Oauth2Server.ConsentRouter.complete/4`.
+  A custom router can reuse protocol handling through
+  `AshAuthentication.Phoenix.Oauth2Server.Consent.prepare/2` and
+  `AshAuthentication.Phoenix.Oauth2Server.Consent.complete/4`.
   Preparation validates the request and browser context without deciding or
   granting consent. Completion accepts `:consent_view` in its separate options
   for rendering or finishes the application's decision with session renewal

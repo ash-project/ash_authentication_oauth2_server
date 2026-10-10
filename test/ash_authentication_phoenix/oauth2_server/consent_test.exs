@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
+defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentTest do
   @moduledoc """
   Exercises preparation and completion of application-owned consent flows.
   Covers parsing, sealed requests, validation and authentication failures,
@@ -15,7 +15,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
   import Plug.Test
 
   alias AshAuthentication.Oauth2Server.{Authorize, PKCE}
-  alias AshAuthentication.Phoenix.Oauth2Server.ConsentRouter
+  alias AshAuthentication.Phoenix.Oauth2Server.Consent
   alias Oauth2ServerTest.{OAuthAuthorizationCode, OAuthClient, OAuthConsent, Server, User}
 
   alias Oauth2ServerTest.{
@@ -184,7 +184,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
             })
           ] do
         assert {:ok, _conn, request} =
-                 ConsentRouter.prepare(browser(conn, context.user),
+                 Consent.prepare(browser(conn, context.user),
                    oauth2_server: Server,
                    consent_view: RecordingView
                  )
@@ -217,7 +217,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
         |> put_req_header("content-type", "application/x-www-form-urlencoded")
         |> browser(context.user)
 
-      assert {:ok, conn, request} = ConsentRouter.prepare(conn, oauth2_server: Server)
+      assert {:ok, conn, request} = Consent.prepare(conn, oauth2_server: Server)
       assert conn.params["selection"] == "workspace-a"
       assert request.method == "POST"
       assert request.action == "approve"
@@ -286,7 +286,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
             })
           ] do
         assert {:halt, conn} =
-                 ConsentRouter.prepare(init_test_session(conn, %{}), oauth2_server: Server)
+                 Consent.prepare(init_test_session(conn, %{}), oauth2_server: Server)
 
         assert conn.status == 401
         assert conn.halted
@@ -302,7 +302,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
           |> Map.put(:query_params, context.params)
           |> init_test_session(%{preserved: "value"})
 
-        assert {:halt, conn} = ConsentRouter.prepare(conn, oauth2_server: SignInServer)
+        assert {:halt, conn} = Consent.prepare(conn, oauth2_server: SignInServer)
         assert conn.status == 302
         assert conn.halted
         assert get_session(conn, :return_to) == path
@@ -340,7 +340,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
     test "returns a halted 404 for unsupported methods", context do
       for method <- [:put, :delete] do
         conn = conn(method, "/oauth/authorize") |> browser(context.user)
-        assert {:halt, conn} = ConsentRouter.prepare(conn, oauth2_server: Server)
+        assert {:halt, conn} = Consent.prepare(conn, oauth2_server: Server)
         assert conn.status == 404
         assert conn.halted
         assert_no_writes()
@@ -354,7 +354,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
         |> browser(context.user)
 
       assert_raise Plug.Parsers.BadEncodingError, fn ->
-        ConsentRouter.prepare(conn, oauth2_server: Server)
+        Consent.prepare(conn, oauth2_server: Server)
       end
 
       assert_no_writes()
@@ -362,7 +362,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
 
     test "propagates missing required configuration", context do
       conn = conn(:get, "/oauth/authorize") |> browser(context.user)
-      assert_raise KeyError, fn -> ConsentRouter.prepare(conn, []) end
+      assert_raise KeyError, fn -> Consent.prepare(conn, []) end
       assert_no_writes()
     end
 
@@ -372,7 +372,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
         |> put_req_header("content-type", "application/octet-stream")
         |> browser(context.user)
 
-      {:halt, conn} = ConsentRouter.prepare(conn, oauth2_server: Server)
+      {:halt, conn} = Consent.prepare(conn, oauth2_server: Server)
       assert conn.status == 400
       assert_no_writes()
     end
@@ -530,7 +530,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
         )
         |> browser(context.user)
 
-      {:halt, conn} = ConsentRouter.prepare(conn, oauth2_server: Server)
+      {:halt, conn} = Consent.prepare(conn, oauth2_server: Server)
       assert conn.status == 302
       assert redirect_query(conn)["error"] == "invalid_request"
       refute Map.has_key?(redirect_query(conn), "state")
@@ -541,7 +541,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
   describe "complete/4" do
     test "uses the default consent view when rendering options are omitted", context do
       {:ok, conn, request} = prepare_get(context)
-      conn = ConsentRouter.complete(conn, request, {:render, %{}})
+      conn = Consent.complete(conn, request, {:render, %{}})
       assert conn.status == 200
       assert conn.halted
       assert conn.resp_body =~ "<form method=\"POST\" action=\"/oauth/authorize\">"
@@ -555,7 +555,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
       {:ok, conn, request} = prepare_get(context)
 
       conn =
-        ConsentRouter.complete(
+        Consent.complete(
           conn,
           request,
           {:render,
@@ -597,7 +597,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
       {:ok, conn, request} = prepare_post(context, sign(context.params))
 
       conn =
-        ConsentRouter.complete(conn, request, {:render, %{validation_error: "Choose access"}},
+        Consent.complete(conn, request, {:render, %{validation_error: "Choose access"}},
           consent_view: RecordingView
         )
 
@@ -611,7 +611,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
       {:ok, conn, request} = prepare_get(context)
 
       assert_raise RuntimeError, "custom consent view failed", fn ->
-        ConsentRouter.complete(conn, request, {:render, %{}}, consent_view: RaisingView)
+        Consent.complete(conn, request, {:render, %{}}, consent_view: RaisingView)
       end
 
       assert_no_writes()
@@ -623,7 +623,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
       Plug.CSRFProtection.load_state(conn.secret_key_base, "")
 
       try do
-        conn = ConsentRouter.complete(conn, request, {:render, %{}}, consent_view: RecordingView)
+        conn = Consent.complete(conn, request, {:render, %{}}, consent_view: RecordingView)
         assert conn.status == 200
         assert_received {:consent_assigns, %{csrf_token: ""}}
         assert_no_writes()
@@ -637,7 +637,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
         prepare_post(context, sign(context.params), "approve", RecordingConsentServer)
 
       consent = Authorize.grant_consent!(Server, context.user, context.client, "mcp")
-      conn = ConsentRouter.complete(conn, request, :approved, consent_view: RaisingView)
+      conn = Consent.complete(conn, request, :approved, consent_view: RaisingView)
       assert conn.status == 302
       assert conn.halted
       assert conn.private.plug_session_info == :renew
@@ -659,7 +659,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
     test "finishes reused GET consent without renewing or writing consent", context do
       consent = Authorize.grant_consent!(Server, context.user, context.client, "mcp")
       {:ok, conn, request} = prepare_get(context)
-      conn = ConsentRouter.complete(conn, request, :approved, consent_view: RaisingView)
+      conn = Consent.complete(conn, request, :approved, consent_view: RaisingView)
       assert conn.status == 302
       refute Map.get(conn.private, :plug_session_info) == :renew
       assert_unchanged_consent(consent)
@@ -668,7 +668,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
 
     test "does not record consent on the application's behalf", context do
       {:ok, conn, request} = prepare_post(context, sign(context.params))
-      conn = ConsentRouter.complete(conn, request, :approved)
+      conn = Consent.complete(conn, request, :approved)
       assert conn.status == 302
       assert {:ok, []} = Ash.read(OAuthConsent)
       assert {:ok, [_]} = Ash.read(OAuthAuthorizationCode)
@@ -678,14 +678,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
       {:ok, conn, request} = prepare_post(context, sign(context.params))
       consent = Authorize.grant_consent!(Server, context.user, context.client, "mcp")
       request = %{request | user: %{id: "invalid"}}
-      assert_raise Ash.Error.Invalid, fn -> ConsentRouter.complete(conn, request, :approved) end
+      assert_raise Ash.Error.Invalid, fn -> Consent.complete(conn, request, :approved) end
       assert {:ok, []} = Ash.read(OAuthAuthorizationCode)
       assert_unchanged_consent(consent)
     end
 
     test "denies without granting, issuing or renewing", context do
       {:ok, conn, request} = prepare_post(context, sign(context.params), "deny")
-      conn = ConsentRouter.complete(conn, request, :denied, consent_view: RaisingView)
+      conn = Consent.complete(conn, request, :denied, consent_view: RaisingView)
       assert conn.status == 302
       assert conn.halted
       refute Map.get(conn.private, :plug_session_info) == :renew
@@ -704,7 +704,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
         {:ok, conn, request} = prepare_post(context, sign(context.params))
 
         conn =
-          ConsentRouter.complete(conn, request, {:error, "server_error", description},
+          Consent.complete(conn, request, {:error, "server_error", description},
             consent_view: RaisingView
           )
 
@@ -726,7 +726,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
 
     test "rejects approving a denied submission and unsupported completion results", context do
       {:ok, conn, request} = prepare_post(context, sign(context.params), "deny")
-      assert_raise ArgumentError, fn -> ConsentRouter.complete(conn, request, :approved) end
+      assert_raise ArgumentError, fn -> Consent.complete(conn, request, :approved) end
 
       for decision <- [
             :unknown,
@@ -734,14 +734,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
             {:error, 123, nil},
             {:error, "server_error", %{}}
           ] do
-        assert_raise ArgumentError, fn -> ConsentRouter.complete(conn, request, decision) end
+        assert_raise ArgumentError, fn -> Consent.complete(conn, request, decision) end
       end
 
       assert_no_writes()
     end
 
     test "keeps the low-level helpers private" do
-      Code.ensure_loaded!(ConsentRouter)
+      Code.ensure_loaded!(Consent)
 
       for {function, arity} <- [
             mint_consent_request: 2,
@@ -751,7 +751,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
             redirect_with_oauth_error: 6,
             sign_in_redirect: 2
           ] do
-        refute function_exported?(ConsentRouter, function, arity)
+        refute function_exported?(Consent, function, arity)
       end
     end
   end
@@ -780,7 +780,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
 
         for decision <- [:approved, :denied, {:error, "server_error", "Could not save consent"}] do
           {:ok, conn, request} = prepare_post(context, sign(params))
-          conn = ConsentRouter.complete(conn, request, decision)
+          conn = Consent.complete(conn, request, decision)
           assert conn.status == 302
           [location] = get_resp_header(conn, "location")
           assert String.starts_with?(location, prefix)
@@ -802,7 +802,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
         Authorize.grant_consent!(Server, context.user, context.client, "mcp")
         {:ok, conn, request} = prepare_get(context)
         assert request.validated.state == nil
-        conn = ConsentRouter.complete(conn, request, {:render, %{}}, consent_view: RecordingView)
+        conn = Consent.complete(conn, request, {:render, %{}}, consent_view: RecordingView)
         assert conn.status == 200
         assert_received {:consent_assigns, %{consent_request: token}}
 
@@ -813,7 +813,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
               do: prepare_get(context),
               else: prepare_post(context, token)
 
-          conn = ConsentRouter.complete(conn, request, decision)
+          conn = Consent.complete(conn, request, decision)
           assert conn.status == 302
           refute Map.has_key?(redirect_query(conn), "state")
           assert redirect_query(conn)["iss"] == Server.issuer_url()
@@ -839,7 +839,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
           request.validated.scope
         )
 
-        conn = ConsentRouter.complete(conn, request, :approved)
+        conn = Consent.complete(conn, request, :approved)
         assert conn.status == 302
         assert {:ok, code} = Ash.get(OAuthAuthorizationCode, redirect_query(conn)["code"])
         assert code.resource_uri == params["resource"]
@@ -855,7 +855,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
       assert request.tenant == "tenant-a"
       assert request.tenant_opts == [tenant: "tenant-a"]
 
-      conn = ConsentRouter.complete(conn, request, {:render, %{}}, consent_view: RecordingView)
+      conn = Consent.complete(conn, request, {:render, %{}}, consent_view: RecordingView)
       assert conn.status == 200
       assert_received {:consent_assigns, %{tenant: "tenant-a", consent_request: token}}
       {:ok, conn, request} = prepare_post(context, token, "approve", TenantIssuerServer)
@@ -868,7 +868,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
         request.tenant_opts
       )
 
-      conn = ConsentRouter.complete(conn, request, :approved)
+      conn = Consent.complete(conn, request, :approved)
       assert redirect_query(conn)["iss"] == "https://tenant-a.example.com"
       assert {:ok, [code]} = Ash.read(TenantedOAuthAuthorizationCode, tenant: "tenant-a")
       assert code.org_id == "tenant-a"
@@ -901,7 +901,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
             {tenant_context("tenant-b"), TenantIssuerServer, "https://tenant-b.example.com"}
           ] do
         {:ok, conn, request} = prepare_post(context, sign(context.params), "deny", server)
-        conn = ConsentRouter.complete(conn, request, :denied)
+        conn = Consent.complete(conn, request, :denied)
         assert redirect_query(conn)["iss"] == issuer
       end
     end
@@ -913,7 +913,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
       |> browser(context.user)
       |> Ash.PlugHelpers.set_tenant(Map.get(context, :tenant))
 
-    ConsentRouter.prepare(conn, oauth2_server: server)
+    Consent.prepare(conn, oauth2_server: server)
   end
 
   defp prepare_post(context, token, action \\ "approve", server \\ Server) do
@@ -922,7 +922,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouterTest do
       |> browser(context.user)
       |> Ash.PlugHelpers.set_tenant(Map.get(context, :tenant))
 
-    ConsentRouter.prepare(conn, oauth2_server: server)
+    Consent.prepare(conn, oauth2_server: server)
   end
 
   defp browser(conn, user), do: conn |> init_test_session(%{}) |> Ash.PlugHelpers.set_actor(user)
