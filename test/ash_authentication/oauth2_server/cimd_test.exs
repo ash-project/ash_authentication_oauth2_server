@@ -182,6 +182,59 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
       assert description =~ "token_endpoint_auth_method"
     end
 
+    test "negotiates and stores none when the client prefers private_key_jwt but supports both" do
+      StubFetcher.stub(
+        @client_id,
+        document(%{
+          "token_endpoint_auth_method" => "private_key_jwt",
+          "token_endpoint_auth_methods_supported" => ["private_key_jwt", "none"]
+        })
+      )
+
+      assert {:ok, client} = CIMD.resolve_client(CimdServer, @client_id)
+      assert client.token_endpoint_auth_method == "none"
+      assert client.cimd_url == @client_id
+      assert client.redirect_uris == [@redirect_uri]
+      assert {:ok, stored} = CIMD.find_client(CimdServer, @client_id)
+      assert stored.token_endpoint_auth_method == "none"
+    end
+
+    test "negotiates a capability list without a singular preference" do
+      metadata =
+        document(%{"token_endpoint_auth_methods_supported" => ["none", "private_key_jwt"]})
+        |> Map.delete("token_endpoint_auth_method")
+
+      StubFetcher.stub(@client_id, metadata)
+      assert {:ok, client} = CIMD.resolve_client(CimdServer, @client_id)
+      assert client.token_endpoint_auth_method == "none"
+    end
+
+    test "rejects clients without a common method, even if the singular field says none" do
+      StubFetcher.stub(
+        @client_id,
+        document(%{"token_endpoint_auth_methods_supported" => ["private_key_jwt"]})
+      )
+
+      assert {:error, "unsupported token_endpoint_auth_method"} =
+               CIMD.resolve_client(CimdServer, @client_id)
+
+      assert Ash.count!(OAuthClient) == 0
+    end
+
+    test "rejects malformed or empty capability lists instead of using the singular default" do
+      for methods <- [[], nil, "none", %{}, ["none", 123]] do
+        StubFetcher.stub(
+          @client_id,
+          document(%{"token_endpoint_auth_methods_supported" => methods})
+        )
+
+        assert {:error, description} = CIMD.resolve_client(CimdServer, @client_id)
+        assert description =~ "non-empty array of strings"
+      end
+
+      assert Ash.count!(OAuthClient) == 0
+    end
+
     test "returns a generic error when the fetch fails" do
       StubFetcher.stub(@client_id, {:error, :nxdomain})
 
@@ -249,10 +302,20 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
 
   describe "full flow with a URL client_id" do
     test "authorize → token → refresh → revoke", %{user: user} do
-      StubFetcher.stub(@client_id, document())
+      # ChatGPT's CIMD preference is private_key_jwt, but it also supports
+      # the public-client PKCE flow this server advertises.
+      StubFetcher.stub(
+        @client_id,
+        document(%{
+          "token_endpoint_auth_method" => "private_key_jwt",
+          "token_endpoint_auth_methods_supported" => ["none", "private_key_jwt"]
+        })
+      )
+
       {verifier, challenge} = pkce_pair()
 
       {:ok, validated} = Authorize.validate_request(CimdServer, authorize_params(challenge))
+      assert validated.client.token_endpoint_auth_method == "none"
       code = Authorize.issue_code!(CimdServer, user, validated)
 
       # The token endpoint identifies the client by its URL — resolved

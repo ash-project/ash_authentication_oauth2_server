@@ -67,6 +67,16 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
   end
 
   describe "Register (DCR)" do
+    test "rejects an unsupported requested method even when CIMD capabilities include none" do
+      assert {:error, "invalid_client_metadata", "unsupported token_endpoint_auth_method"} =
+               Register.register(Server, %{
+                 "client_name" => "Confidential client",
+                 "redirect_uris" => ["https://app.example.com/cb"],
+                 "token_endpoint_auth_method" => "private_key_jwt",
+                 "token_endpoint_auth_methods_supported" => ["none", "private_key_jwt"]
+               })
+    end
+
     test "happy path returns client + body" do
       {client, body} = register_client()
 

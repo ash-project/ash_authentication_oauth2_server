@@ -105,4 +105,34 @@ defmodule AshAuthentication.Oauth2Server.ClientMetadata do
     do: {:error, "invalid_client_metadata", "unsupported token_endpoint_auth_method"}
 
   def validate_auth_method(_), do: :ok
+
+  @doc """
+  Select a supported authentication method from a CIMD document.
+
+  When `token_endpoint_auth_methods_supported` is present, select from the
+  intersection of the client's capabilities and this server's methods. The
+  singular `token_endpoint_auth_method` is a preference, not a requirement.
+  Without the capability list, preserve the singular field's validation and
+  the existing public-client default. Dynamic registration still uses
+  `validate_auth_method/1` to validate the requested method directly.
+  """
+  @spec negotiate_auth_method(map()) ::
+          {:ok, String.t()} | {:error, String.t(), String.t()}
+  def negotiate_auth_method(%{"token_endpoint_auth_methods_supported" => methods}) do
+    if is_list(methods) and methods != [] and Enum.all?(methods, &is_binary/1) do
+      case Enum.find(@valid_auth_methods, &(&1 in methods)) do
+        nil -> {:error, "invalid_client_metadata", "unsupported token_endpoint_auth_method"}
+        method -> {:ok, method}
+      end
+    else
+      {:error, "invalid_client_metadata",
+       "token_endpoint_auth_methods_supported must be a non-empty array of strings"}
+    end
+  end
+
+  def negotiate_auth_method(params) do
+    with :ok <- validate_auth_method(params) do
+      {:ok, Map.get(params, "token_endpoint_auth_method", "none")}
+    end
+  end
 end
