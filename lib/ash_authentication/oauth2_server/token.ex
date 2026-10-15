@@ -63,14 +63,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
           {:ok, token_response()}
           | {:error, atom()}
   def exchange_authorization_code(server, params, opts \\ []) do
-    tenant = Keyword.get(opts, :tenant)
-    secret_context = secret_context(tenant)
-
     with :ok <- check_no_client_credentials(params, opts),
          :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
          {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
          :ok <- check_grant_type(client, "authorization_code"),
          {:ok, code} <- load_code(server, params, client.id, opts),
+         opts = recover_grant_tenant(opts, server.authorization_code_resource(), code),
+         tenant = Keyword.get(opts, :tenant),
+         secret_context = secret_context(tenant),
          :ok <- verify_pkce(code, params),
          :ok <- check_redirect_match(params, code),
          :ok <- check_resource_match(server, params, code, secret_context),
@@ -377,6 +377,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # the scope of the grant (RFC 6749 §6).
   defp complete_rotation(server, old_row, scope, presented_client_id, new_refresh, opts) do
     {new_id, new_hash, new_raw} = new_refresh
+    opts = recover_grant_tenant(opts, server.refresh_token_resource(), old_row)
     tenant = Keyword.get(opts, :tenant)
     access_scope = scope || old_row.scope
 
@@ -644,6 +645,31 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   # ── opts helper ───────────────────────────────────────────────────────────
+
+  # Recover the tenant from the grant being redeemed when the caller has not
+  # supplied one.
+  #
+  # `/token` and `/revoke` are reached with no session and no browser context.
+  # An app whose tenant lives in a subdomain or a header can set it upstream
+  # and this is a no-op; an app whose tenants share one host has nothing to
+  # derive it from, and the request carries only an opaque code or refresh
+  # token. The row behind that credential is the authority anyway — it was
+  # written under the tenant the user consented in — so read it from there.
+  #
+  # Without this, such an app mints a token with no `tenant` claim and then
+  # fails outright on the refresh row, whose tenant attribute cannot be null.
+  # Only attribute-based multitenancy can be recovered this way; `:context`
+  # strategies have no attribute to read, and are left to the caller.
+  defp recover_grant_tenant(opts, resource, record) do
+    with nil <- opts[:tenant],
+         tenant_attribute when not is_nil(tenant_attribute) <-
+           Ash.Resource.Info.multitenancy_attribute(resource),
+         tenant when not is_nil(tenant) <- Map.get(record, tenant_attribute) do
+      Keyword.put(opts, :tenant, tenant)
+    else
+      _ -> opts
+    end
+  end
 
   # Bypass context + tenant (when provided). Used for every Ash call in
   # this module.
