@@ -24,6 +24,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   ## Options
 
     * `:oauth2_server` (required) — the user's `Oauth2Server` config module
+    * `:recover_tenant_from_grant?` — opt into recovery of a missing tenant
+      from the grant's multitenancy attribute at `/token`. Defaults to `false`.
+      Grant resources must support lookup without a tenant (for example,
+      `global? true`). Context-based multitenancy is not supported.
   """
 
   use Plug.Router, copy_opts_to_assign: :oauth2_server_router_opts
@@ -156,7 +160,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   post "/token" do
     server = server!(conn.assigns.oauth2_server_router_opts)
     params = conn.params || %{}
-    opts = client_request_opts(conn)
+
+    opts =
+      Keyword.take(conn.assigns.oauth2_server_router_opts, [:recover_tenant_from_grant?]) ++
+        client_request_opts(conn)
 
     result =
       case Map.get(params, "grant_type") do
