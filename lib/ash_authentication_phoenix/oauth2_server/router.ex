@@ -142,10 +142,23 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
   ## Options
 
     * `:oauth2_server` (required) — your `Oauth2Server` config module.
+    * `:recover_tenant_from_grant?` — recover a missing token-request tenant
+      from the grant's multitenancy attribute. Defaults to `false`. Requires
+      grant resources that support lookup without a tenant (for example,
+      `global? true`); context-based multitenancy is not supported.
     * `:oauth_path` — prefix for `/token`, `/register`, etc. Defaults to `/oauth`.
     * `:well_known_path` — prefix for `/oauth-authorization-server`,
       `/oauth-protected-resource`, `/openid-configuration`.
       Defaults to `/.well-known`.
+  For shared endpoints where the tenant is selected during consent, opt into
+  recovering it from the authorization code or refresh token:
+
+      oauth2_server_protocol_routes(
+        oauth2_server: MyApp.Oauth2Server,
+        recover_tenant_from_grant?: true
+      )
+
+  A tenant set by an upstream plug always takes precedence.
   """
   defmacro oauth2_server_protocol_routes(opts \\ []) when is_list(opts) do
     quote location: :keep do
@@ -156,7 +169,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Router do
 
       scope "/", alias: false do
         forward oauth_path, AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter,
-          oauth2_server: server
+          oauth2_server: server,
+          recover_tenant_from_grant?: Keyword.get(opts, :recover_tenant_from_grant?, false)
 
         # The same plug is forwarded here, but `well_known?: true` restricts it
         # to the metadata discovery documents. Phoenix's forward strips the

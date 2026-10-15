@@ -45,12 +45,20 @@ defmodule AshAuthentication.Oauth2Server.Token do
   Options shared across this module's public functions.
 
     * `:tenant` — the Ash tenant.
+    * `:recover_tenant_from_grant?` — recover a missing tenant from the grant
+      resource's multitenancy attribute. Defaults to `false`. Grant resources must
+      support lookup without a tenant (for example, with `global? true`).
+      Context-based multitenancy is not supported.
     * `:authorization_scheme` — the scheme of the request's `Authorization`
       header, downcased (for example `"basic"`), or `nil` without one. The
       server supports public clients only, so any client credentials make
       the request fail (OAuth 2.1 §3.2.2).
   """
-  @type opts :: [tenant: any(), authorization_scheme: String.t() | nil]
+  @type opts :: [
+          tenant: any(),
+          recover_tenant_from_grant?: boolean(),
+          authorization_scheme: String.t() | nil
+        ]
 
   # ── authorization_code grant ───────────────────────────────────────────────
 
@@ -646,10 +654,10 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   # ── opts helper ───────────────────────────────────────────────────────────
 
-  # Recover the tenant from the grant being redeemed when the caller has not
-  # supplied one.
+  # Recover the tenant from the grant when explicitly enabled and the caller
+  # has not supplied one.
   #
-  # `/token` and `/revoke` are reached with no session and no browser context.
+  # `/token` is reached with no session and no browser context.
   # An app whose tenant lives in a subdomain or a header can set it upstream
   # and this is a no-op; an app whose tenants share one host has nothing to
   # derive it from, and the request carries only an opaque code or refresh
@@ -661,7 +669,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # Only attribute-based multitenancy can be recovered this way; `:context`
   # strategies have no attribute to read, and are left to the caller.
   defp recover_grant_tenant(opts, resource, record) do
-    with nil <- opts[:tenant],
+    with true <- Keyword.get(opts, :recover_tenant_from_grant?, false),
+         nil <- opts[:tenant],
          tenant_attribute when not is_nil(tenant_attribute) <-
            Ash.Resource.Info.multitenancy_attribute(resource),
          tenant when not is_nil(tenant) <- Map.get(record, tenant_attribute) do
