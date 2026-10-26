@@ -233,7 +233,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Consent do
       append_query(
         validated.redirect_uri,
         %{
-          "code" => code.id,
+          "code" => Authorize.get_raw_code(code),
           # RFC 9207 — identify the issuer in the authorization response
           # so the client can detect authorization-server mix-up attacks.
           "iss" => issuer_url(request.server, request.tenant)
