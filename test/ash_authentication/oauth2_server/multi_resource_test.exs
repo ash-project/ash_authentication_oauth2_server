@@ -79,7 +79,7 @@ defmodule AshAuthentication.Oauth2Server.MultiResourceTest do
   defp exchange(client, code, verifier, resource) do
     Token.exchange_authorization_code(Server, %{
       "grant_type" => "authorization_code",
-      "code" => code.id,
+      "code" => Authorize.get_raw_code(code),
       "redirect_uri" => @redirect_uri,
       "code_verifier" => verifier,
       "client_id" => client.id,

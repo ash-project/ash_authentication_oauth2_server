@@ -265,6 +265,8 @@ if Code.ensure_loaded?(Igniter) do
         "--default-actions",
         "read,destroy",
         "--attribute",
+        "code_hash:string:required:public",
+        "--attribute",
         "client_id:uuid_v7:required:public",
         "--attribute",
         "user_id:#{user_id_type(options)}:required:public",
@@ -285,7 +287,7 @@ if Code.ensure_loaded?(Igniter) do
       ])
       |> Ash.Resource.Igniter.add_new_action(mod, :create, """
       create :create do
-        accept [:client_id, :user_id, :redirect_uri, :code_challenge, :scope, :resource_uri, :expires_at]
+        accept [:code_hash, :client_id, :user_id, :redirect_uri, :code_challenge, :scope, :resource_uri, :expires_at]
       end
       """)
       |> Ash.Resource.Igniter.add_new_action(mod, :consume, """
@@ -298,6 +300,9 @@ if Code.ensure_loaded?(Igniter) do
 
         change atomic_update(:consumed_at, expr(now()))
       end
+      """)
+      |> Ash.Resource.Igniter.add_new_identity(mod, :by_code_hash, """
+      identity :by_code_hash, [:code_hash]
       """)
       |> Igniter.compose_task("ash.extend", [
         inspect(mod),

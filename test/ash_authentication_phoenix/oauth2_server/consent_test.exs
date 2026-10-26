@@ -11,6 +11,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentTest do
   """
   use ExUnit.Case, async: false
 
+  require Ash.Query
+
   import Plug.Conn
   import Plug.Test
 
@@ -649,11 +651,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentTest do
       assert code.code_challenge == context.params["code_challenge"]
       assert code.scope == "mcp"
 
-      assert redirect_query(conn) == %{
-               "code" => code.id,
-               "state" => context.params["state"],
-               "iss" => Server.issuer_url()
-             }
+      query = redirect_query(conn)
+      assert query["state"] == context.params["state"]
+      assert query["iss"] == Server.issuer_url()
+      assert query["code"] != code.id
+      assert code.code_hash == Authorize.hash_code(query["code"])
     end
 
     test "finishes reused GET consent without renewing or writing consent", context do
@@ -841,7 +843,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentTest do
 
         conn = Consent.complete(conn, request, :approved)
         assert conn.status == 302
-        assert {:ok, code} = Ash.get(OAuthAuthorizationCode, redirect_query(conn)["code"])
+        raw_code = redirect_query(conn)["code"]
+
+        assert {:ok, code} =
+                 OAuthAuthorizationCode
+                 |> Ash.Query.filter(code_hash == ^Authorize.hash_code(raw_code))
+                 |> Ash.read_one()
+
+        assert code.id != raw_code
         assert code.resource_uri == params["resource"]
         assert code.scope == Atom.to_string(resource)
       end

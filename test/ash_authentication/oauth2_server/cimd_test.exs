@@ -260,7 +260,7 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
       assert {:ok, token_response} =
                Token.exchange_authorization_code(CimdServer, %{
                  "grant_type" => "authorization_code",
-                 "code" => code.id,
+                 "code" => Authorize.get_raw_code(code),
                  "client_id" => @client_id,
                  "redirect_uri" => @redirect_uri,
                  "code_verifier" => verifier
@@ -308,7 +308,7 @@ defmodule AshAuthentication.Oauth2Server.CIMDTest do
       assert {:error, :invalid_client} =
                Token.exchange_authorization_code(CimdServer, %{
                  "grant_type" => "authorization_code",
-                 "code" => code.id,
+                 "code" => Authorize.get_raw_code(code),
                  "client_id" => "https://other.example.net/client.json",
                  "redirect_uri" => @redirect_uri,
                  "code_verifier" => verifier

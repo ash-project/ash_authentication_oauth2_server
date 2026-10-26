@@ -28,7 +28,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   require Ash.Query
   require Logger
 
-  alias AshAuthentication.Oauth2Server.{CIMD, Jwt, PKCE}
+  alias AshAuthentication.Oauth2Server.{Authorize, CIMD, Jwt, PKCE}
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -188,13 +188,25 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   # A request that fails any check leaves the code unconsumed, so a client
   # that sent a bad verifier or resource can retry with the same code.
-  defp load_code(server, %{"code" => code_id}, client_id, opts) do
-    with {:ok, code} <-
-           code_or_error(Ash.get(server.authorization_code_resource(), code_id, ash_opts(opts))),
+  defp load_code(server, %{"code" => raw_code}, client_id, opts) do
+    hash = Authorize.hash_code(raw_code)
+
+    with {:ok, code} <- find_code(server, hash, opts),
          :ok <- check_client_match(code, client_id),
          :ok <- check_not_consumed(code),
          :ok <- check_not_expired(code) do
       {:ok, code}
+    end
+  end
+
+  defp find_code(server, hash, opts) do
+    server.authorization_code_resource()
+    |> Ash.Query.filter(code_hash == ^hash)
+    |> Ash.read_one(ash_opts(opts))
+    |> case do
+      {:ok, nil} -> {:error, :invalid_code}
+      {:ok, row} -> {:ok, row}
+      _ -> {:error, :invalid_code}
     end
   end
 
