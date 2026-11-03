@@ -191,8 +191,10 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
   fetched from **exactly** (no normalization — per the draft), a
   `client_name` is present (required by the MCP spec; it's what the
   consent screen shows the user), and the `redirect_uris` /
-  `grant_types` / `response_types` / `token_endpoint_auth_method`
-  fields pass the same validation Dynamic Client Registration applies.
+  `grant_types` / `response_types` fields pass the same validation Dynamic
+  Client Registration applies. Authentication is negotiated from
+  `token_endpoint_auth_methods_supported` when supplied, falling back to
+  validation of the singular `token_endpoint_auth_method` otherwise.
   """
   @spec validate_document(document :: map(), url :: String.t()) ::
           :ok | {:error, String.t()}
@@ -202,7 +204,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
          :ok <- flatten(ClientMetadata.validate_redirect_uris(document)),
          :ok <- flatten(ClientMetadata.validate_grant_types(document)),
          :ok <- flatten(ClientMetadata.validate_response_types(document)) do
-      flatten(ClientMetadata.validate_auth_method(document))
+      flatten(ClientMetadata.negotiate_auth_method(document))
     end
   end
 
@@ -217,18 +219,21 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
   defp check_client_name(_), do: {:error, "client_name is required"}
 
   defp flatten(:ok), do: :ok
+  defp flatten({:ok, _method}), do: :ok
   defp flatten({:error, _code, description}), do: {:error, description}
 
   # ── persistence ────────────────────────────────────────────────────────────
 
   defp upsert_client(server, url, document, opts) do
+    {:ok, auth_method} = ClientMetadata.negotiate_auth_method(document)
+
     attrs = %{
       cimd_url: url,
       client_name: Map.fetch!(document, "client_name"),
       redirect_uris: Map.fetch!(document, "redirect_uris"),
       grant_types: ClientMetadata.narrow_grant_types(document),
       response_types: Map.get(document, "response_types", ["code"]),
-      token_endpoint_auth_method: Map.get(document, "token_endpoint_auth_method", "none"),
+      token_endpoint_auth_method: auth_method,
       scope: Enum.join(server.scopes(), " ")
     }
 
