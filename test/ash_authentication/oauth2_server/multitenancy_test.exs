@@ -29,6 +29,18 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
     TenantedUser
   }
 
+  require Ash.Query
+
+  defmodule RecoveryRouter do
+    use Phoenix.Router
+    use AshAuthentication.Phoenix.Oauth2Server.Router
+
+    oauth2_server_protocol_routes(
+      oauth2_server: Oauth2ServerTest.TenantedServer,
+      recover_tenant_from_grant?: true
+    )
+  end
+
   @tenant_a "org-alpha"
   @tenant_b "org-beta"
 
@@ -130,7 +142,8 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
                    "redirect_uri" => redirect_uri,
                    "code_verifier" => verifier
                  },
-                 tenant: @tenant_a
+                 tenant: @tenant_a,
+                 recover_tenant_from_grant?: true
                )
 
       assert is_binary(response.access_token)
@@ -168,7 +181,8 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
                    "redirect_uri" => redirect_uri,
                    "code_verifier" => verifier
                  },
-                 tenant: @tenant_b
+                 tenant: @tenant_b,
+                 recover_tenant_from_grant?: true
                )
 
       # Code is still consumable under the right tenant
@@ -181,7 +195,8 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
                    "redirect_uri" => redirect_uri,
                    "code_verifier" => verifier
                  },
-                 tenant: @tenant_a
+                 tenant: @tenant_a,
+                 recover_tenant_from_grant?: true
                )
     end
 
@@ -220,7 +235,8 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
                    "client_id" => client.id,
                    "resource" => TenantedServer.resource_url()
                  },
-                 tenant: @tenant_b
+                 tenant: @tenant_b,
+                 recover_tenant_from_grant?: true
                )
 
       # Right tenant: rotation succeeds, new JWT still carries the tenant claim
@@ -232,12 +248,132 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
                    "client_id" => client.id,
                    "resource" => TenantedServer.resource_url()
                  },
-                 tenant: @tenant_a
+                 tenant: @tenant_a,
+                 recover_tenant_from_grant?: true
                )
 
       assert refresh_a2 != refresh_a
       assert {:ok, claims} = Jwt.verify(TenantedServer, at)
       assert claims["tenant"] == @tenant_a
+    end
+
+    for mode <- [:default, :disabled, :enabled, :router] do
+      @mode mode
+      test "code tenant recovery is opt-in (#{mode})", %{user_a: user_a} do
+        client = register_client(@tenant_a)
+        redirect_uri = "https://chat.example.com/cb"
+        {verifier, challenge} = pkce_pair()
+
+        {:ok, validated} =
+          Authorize.validate_request(
+            TenantedServer,
+            authorize_params(client, challenge, redirect_uri),
+            tenant: @tenant_a
+          )
+
+        code = Authorize.issue_code!(TenantedServer, user_a, validated, tenant: @tenant_a)
+
+        # No `tenant:` opt. An app whose tenants share a host has nothing to derive one from at
+        # `/token`: the request carries only the code. Before the grant supplied it, the refresh
+        # row could not be written at all, because its tenant attribute cannot be null.
+        params = %{
+          "code" => code.id,
+          "client_id" => client.id,
+          "redirect_uri" => redirect_uri,
+          "code_verifier" => verifier
+        }
+
+        opts =
+          case @mode do
+            :default -> []
+            :disabled -> [recover_tenant_from_grant?: false]
+            _ -> [recover_tenant_from_grant?: true]
+          end
+
+        result =
+          if @mode == :router do
+            conn =
+              Plug.Test.conn(
+                :post,
+                "/oauth/token",
+                Map.put(params, "grant_type", "authorization_code")
+              )
+
+            conn = RecoveryRouter.call(conn, RecoveryRouter.init([]))
+            assert conn.status == 200
+            body = Jason.decode!(conn.resp_body)
+            {:ok, %{access_token: body["access_token"], refresh_token: body["refresh_token"]}}
+          else
+            Token.exchange_authorization_code(TenantedServer, params, opts)
+          end
+
+        if @mode in [:enabled, :router] do
+          assert {:ok, response} = result
+          assert {:ok, claims} = Jwt.verify(TenantedServer, response.access_token)
+          assert claims["tenant"] == @tenant_a
+
+          refresh_row =
+            TenantedOAuthRefreshToken
+            |> Ash.Query.filter(user_id == ^user_a.id)
+            |> Ash.read_one!(authorize?: false)
+
+          assert refresh_row.org_id == @tenant_a
+        else
+          assert {:error, :refresh_create_failed} = result
+        end
+      end
+    end
+
+    for recovery? <- [nil, false, true] do
+      @recovery? recovery?
+      test "refresh tenant recovery is opt-in (#{inspect(recovery?)})",
+           %{user_a: user_a} do
+        client = register_client(@tenant_a)
+        redirect_uri = "https://chat.example.com/cb"
+        {verifier, challenge} = pkce_pair()
+
+        {:ok, validated} =
+          Authorize.validate_request(
+            TenantedServer,
+            authorize_params(client, challenge, redirect_uri),
+            tenant: @tenant_a
+          )
+
+        code = Authorize.issue_code!(TenantedServer, user_a, validated, tenant: @tenant_a)
+
+        {:ok, %{refresh_token: refresh}} =
+          Token.exchange_authorization_code(
+            TenantedServer,
+            %{
+              "code" => code.id,
+              "client_id" => client.id,
+              "redirect_uri" => redirect_uri,
+              "code_verifier" => verifier
+            },
+            tenant: @tenant_a
+          )
+
+        opts = if is_nil(@recovery?), do: [], else: [recover_tenant_from_grant?: @recovery?]
+
+        result =
+          Token.exchange_refresh_token(
+            TenantedServer,
+            %{
+              "refresh_token" => refresh,
+              "client_id" => client.id,
+              "resource" => TenantedServer.resource_url()
+            },
+            opts
+          )
+
+        if @recovery? do
+          assert {:ok, %{access_token: rotated}} = result
+          assert {:ok, claims} = Jwt.verify(TenantedServer, rotated)
+          assert claims["tenant"] == @tenant_a
+        else
+          assert {:error, _} = result
+        end
+      end
     end
   end
 
