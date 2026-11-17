@@ -6,45 +6,53 @@ SPDX-License-Identifier: MIT
 
 # Client credentials
 
-`client_credentials` issues an access token that represents the **OAuth
-client itself** — not a user who clicked “Allow”. Use it when another
-service (a worker, a partner backend, an internal tool) needs scoped API
-access and there is no interactive login to run.
+The `client_credentials` grant
+([RFC 6749 section 4.4](https://www.rfc-editor.org/rfc/rfc6749#section-4.4))
+issues an access token that represents the OAuth client itself. Use it when
+another service (a worker, a partner backend, an internal tool) needs scoped
+API access without an interactive login.
 
-That is a different trust model from the authorization-code path covered
-elsewhere: there is no consent screen, no refresh token, and
-`ClientBearerPlug` loads the **client** Ash record as the actor instead of
-a user.
+The client sends its id and secret to `/oauth/token` and gets an access token
+back. There is no consent screen and no refresh token: when the token expires,
+the client requests a new one the same way. On your API, `BearerPlug` verifies
+the token and sets the client's Ash record as the actor, so your policies
+authorize the client.
 
 ## Enabling the grant
 
-The grant is on out of the box. `:verify_client_secret` defaults to
-`{AshAuthentication.Oauth2Server.ClientSecret, :verify, []}`, which
-constant-time-compares a SHA-256 digest on the client’s
-`client_secret_hash` attribute (added by the installer).
-
-You can disable it by setting the `verify_client_secret` to `nil`:
+The grant is off by default. Add it to `:supported_grants`:
 
 ```elixir
 defmodule MyApp.Oauth2Server do
   use AshAuthentication.Oauth2Server,
     # ...required options...
-    scopes: ["my-scope"]
-    # Disable the client_secret grant.
-    # verify_client_secret: nil
-    # Or overwrite the verification function with your own.
-    # verify_client_secret: {MyApp.Accounts, :verify_oauth_client_secret, []}
-    # extra_access_token_claims: {MyApp.Accounts, :oauth_extra_claims, []}
+    scopes: ["my-scope"],
+    supported_grants: [:authorization_code, :refresh_token, :client_credentials]
 end
 ```
 
-The `extra_access_token_claims` allows you to set additional fields on the JWT
-claims. Reserved JWT claims (`iss`, `sub`, `aud`, ...) are not overwritable.
+The metadata document then lists `client_credentials` in
+`grant_types_supported`. A server can also support this grant alone; see the
+grants section of `AshAuthentication.Oauth2Server` for what each entry
+switches on.
+
+Two further options apply:
+
+* `:verify_client_secret` checks the secret a client presents. The default,
+  `AshAuthentication.Oauth2Server.ClientSecret`, compares a SHA-256 digest
+  with the `client_secret_hash` attribute of the client. Override it to
+  verify against a KMS or another store.
+* `:extra_access_token_claims` adds claims to every access token. For this
+  grant the callback receives the client record, which is useful for tenancy
+  claims. Reserved claims (`iss`, `sub`, `aud`, `client_id`, `scope`, `iat`,
+  `nbf`, `exp`, `jti`, `tenant`, `gty`) cannot be overridden.
 
 ## Creating a client
 
-Confidential clients are ordinary Ash rows. Add a create action to your client
-resource that accepts the secret hash:
+Dynamic client registration and Client ID Metadata Documents register public
+clients only, so a client for this grant is created by your application. The
+installer adds the `client_secret_hash` and `allowed_resources` attributes to
+the client resource; add a create action that accepts them:
 
 ```elixir
 create :register_client_credentials do
@@ -55,7 +63,8 @@ create :register_client_credentials do
     :response_types,
     :token_endpoint_auth_method,
     :scope,
-    :client_secret_hash
+    :client_secret_hash,
+    :allowed_resources
   ]
 end
 ```
@@ -70,106 +79,58 @@ client =
     redirect_uris: [],
     grant_types: ["client_credentials"],
     response_types: [],
-    token_endpoint_auth_method: "client_secret_post",
+    token_endpoint_auth_method: "client_secret_basic",
     scope: "my-scope",
     client_secret_hash: hash
   })
   |> Ash.create!()
 
-# Pass the client.id and plain variables to the user once. Never log them.
+# Show `client.id` and `plain` to the operator once. Never log them.
 ```
 
-Prefer `client_secret_basic` or `client_secret_post` on the client row —
-both mean “confidential client with a secret”. Callers may authenticate
-with **either** HTTP Basic **or** form-body credentials regardless of
-which of those two values is stored. Use `none` only for public clients;
-those cannot use this grant.
+The client metadata follows
+[RFC 7591 section 2](https://www.rfc-editor.org/rfc/rfc7591#section-2):
 
-A client with any method other than `none` is confidential on **every**
-grant, not only this one: if you also give it `authorization_code` /
-`refresh_token`, it must present its secret on those token requests too
-(RFC 6749 §4.1.3 / §6), otherwise the request fails with
-`invalid_client`. The check runs before the code is consumed or the
-refresh token rotated, so a failed attempt doesn't burn either. The same
-applies to `/oauth/revoke`. Public clients (`none`) must not send a secret
-at all; they get `invalid_client` if they do.
+* `grant_types` lists the grants the client may use. A client that lists only
+  `client_credentials` cannot start `/oauth/authorize` or redeem a code
+  (`unauthorized_client`), so a machine client cannot obtain user tokens. A
+  client without the attribute has the default, `["authorization_code"]`.
+* `token_endpoint_auth_method` is `client_secret_basic` (HTTP Basic) or
+  `client_secret_post` (`client_id` and `client_secret` in the body). The
+  server accepts the registered method only. A client with `none` is public
+  and cannot use this grant.
+* `scope` is the client's allow-list. A request may ask for a subset of it.
+  When the request omits `scope`, the whole list is granted.
+* `allowed_resources`, when set, names the resources the client may request
+  tokens for. Without it, the client may use every configured resource.
 
-`grant_types` is enforced on every grant. A client that lists only
-`client_credentials` cannot start `/oauth/authorize` or redeem a code
-(`unauthorized_client`), so a machine client can't be used to obtain
-user-delegated tokens. A client must list `refresh_token` to get a refresh
-token or to use the refresh grant. A `nil` `grant_types` means the RFC 7591
-default, `["authorization_code"]`.
+A confidential client authenticates on every grant it uses, not only this
+one. If it also lists `authorization_code` or `refresh_token`, it presents
+its secret on those token requests and on `/oauth/revoke` too
+([RFC 6749 section 3.2.1](https://www.rfc-editor.org/rfc/rfc6749#section-3.2.1)).
 
-## Protecting resource-server routes
+## Requesting a token
 
-Wire a pipeline that uses `ClientBearerPlug`. Do **not** reuse the user
-`BearerPlug`: tokens from this grant carry a reserved
-`"gty" => "client_credentials"` claim (and set both `sub` and `client_id`
-to the client’s id). `BearerPlug` rejects any token with a `gty` claim,
-and `ClientBearerPlug` requires it, so machine and user tokens cannot
-stand in for each other even if a client id and a user id collide.
-`:extra_access_token_claims` cannot set `gty`. If you verify tokens
-yourself with `AshAuthentication.Oauth2Server.Jwt.verify/2`, check `gty`
-the same way before treating `sub` as a user id.
-
-```elixir
-pipeline :api do
-  plug AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug,
-    oauth2_server: MyApp.Oauth2Server
-
-  plug AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug,
-    oauth2_server: MyApp.Oauth2Server,
-    scope: "my-scope"
-end
-```
-
-If the server protects more than one resource (the `:resources` option),
-name the resource each pipeline guards with `resource: :name` on both
-plugs. The plug then accepts only tokens issued for that resource, and the
-`WWW-Authenticate` challenge points at that resource's metadata. The option
-is required when there is more than one resource, and plug initialisation
-raises without it.
-
-On each request the plug re-loads the client and checks that
-`client_credentials` is still allowed and that the token’s scopes remain
-inside the client’s current allow-list — so stripping a grant or narrowing
-`scope` on the row takes effect before the JWT’s `exp`.
-
-## Calling `/oauth/token`
-
-Body credentials (`client_secret_post` style):
+With `client_secret_basic`:
 
 ```bash
 curl -sS -X POST 'https://auth.example.com/oauth/token' \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -u 'CLIENT_ID:CLIENT_SECRET' \
+  -d 'grant_type=client_credentials' \
+  -d 'scope=my-scope'
+```
+
+With `client_secret_post`:
+
+```bash
+curl -sS -X POST 'https://auth.example.com/oauth/token' \
   -d 'grant_type=client_credentials' \
   -d 'client_id=CLIENT_ID' \
   -d 'client_secret=CLIENT_SECRET' \
   -d 'scope=my-scope'
 ```
 
-The request must be `application/x-www-form-urlencoded` (RFC 6749 §4.4.2);
-a JSON body is rejected with `invalid_request`.
-
-HTTP Basic (`client_secret_basic` style) — same client row works either
-way:
-
-```bash
-curl -sS -X POST 'https://auth.example.com/oauth/token' \
-  -u 'CLIENT_ID:CLIENT_SECRET' \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=client_credentials' \
-  -d 'scope=my-scope'
-```
-
-Credentials belong in the body **or** in HTTP Basic — never both, and never
-in the query string (RFC 6749 §5.2 / §2.3.1). The registered
-`token_endpoint_auth_method` (`client_secret_basic` or
-`client_secret_post`) is metadata for clients/tooling; this server does
-not reject a valid secret presented via the other channel.
-
-A successful response looks like:
+The response is an access token without a refresh token:
 
 ```json
 {
@@ -180,92 +141,75 @@ A successful response looks like:
 }
 ```
 
-There is no refresh token; when it expires the client authenticates again.
-At least one scope is required (request or the client’s default
-allow-list). Scopes must be offered by the resource the token is for.
+A token is bound to one resource
+([RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)). With one configured
+resource, `resource` is optional. With several, send the resource's URL as
+`resource`; scopes are checked against that resource's scopes.
 
-### Choosing the resource
+Errors follow
+[RFC 6749 section 5.2](https://www.rfc-editor.org/rfc/rfc6749#section-5.2):
 
-A token is bound to one resource (RFC 8707). Send `resource` with the
-resource's URL, an absolute URI without a fragment:
+| Error | When |
+|---|---|
+| `invalid_request` | Credentials in both the header and the body, in the query string, or a malformed parameter. |
+| `invalid_client` | Unknown client, wrong secret, no credentials, a public client, or a method other than the registered one. With an `Authorization` header the status is 401 with a `WWW-Authenticate: Basic` challenge. |
+| `unauthorized_client` | The client authenticated but does not list `client_credentials`. |
+| `unsupported_grant_type` | The server does not list `client_credentials` in `:supported_grants`. |
+| `invalid_scope` | A scope outside the client's allow-list or the resource's scopes, or no scope at all. |
+| `invalid_target` | An unknown, ambiguous, or disallowed `resource`. |
 
-```bash
-  -d 'resource=https://api.example.com/mcp'
-```
+## Protecting resource-server routes
 
-- With a single configured resource, `resource` is optional and defaults to
-  it.
-- With several, `resource` is required. Without it the request is
-  ambiguous and fails with `invalid_target`.
-- A value that matches no configured resource, or several different
-  resources in one request, is `invalid_target`. The same resource repeated
-  is accepted.
-- The token's `aud` is the resource's URL. Scopes are checked against that
-  resource's scopes (its `:scopes` entry, or the server's `:scopes` when it
-  has none), so a scope the resource does not offer is `invalid_scope`.
-  When you omit `scope`, the client's whole allow-list is the default, so
-  it must be a subset of that resource's scopes. Otherwise name the
-  scopes you want.
-
-By default a client may ask for any configured resource, limited only by
-its `scope` allow-list. To restrict a machine client to some resources, give
-the client resource an optional `allowed_resources` string array attribute
-(the installer adds it) and list the resource names:
+`AshAuthentication.Phoenix.Oauth2Server.BearerPlug` accepts tokens from this
+grant as soon as the server supports it. The actor it sets is the client
+record, where a user token sets a user record, so policies on a route that
+takes both must handle both:
 
 ```elixir
-allowed_resources: ["mcp"]
+pipeline :api do
+  plug AshAuthentication.Phoenix.Oauth2Server.BearerPlug,
+    oauth2_server: MyApp.Oauth2Server
+
+  plug AshAuthentication.Phoenix.Oauth2Server.RequireScopePlug,
+    oauth2_server: MyApp.Oauth2Server,
+    scope: "my-scope"
+end
 ```
 
-A request for another resource is `invalid_target`. A client with no list
-(`nil` or empty) is unrestricted. `ClientBearerPlug` re-checks the list on
-every request, so removing a resource from it also stops tokens that were
-already issued. Add the attribute to older client resources yourself and
-accept it on your create and update actions.
+Access tokens from this grant carry `"gty": "client_credentials"`, and their
+`sub` is the client id
+([RFC 9068 section 2.2](https://www.rfc-editor.org/rfc/rfc9068#section-2.2)).
+User tokens never carry `gty`, and `:extra_access_token_claims` cannot set
+it. If you verify tokens yourself with
+`AshAuthentication.Oauth2Server.Jwt.verify/2`, check `gty` before treating
+`sub` as a user id.
 
-### Errors
+On each request the plug reloads the client and checks that it still lists
+`client_credentials`, may still use the resource, and that the token's
+scopes are still within its allow-list. Removing the grant, a resource, or a
+scope from the client row takes effect before the token expires.
 
-`invalid_client` is a `400`, or a `401` with a `WWW-Authenticate: Basic`
-challenge when the client authenticated with the `Authorization` header
-(OAuth 2.1 §3.2.4).
+## Dynamic client registration and metadata documents
 
-## Security notes (RFC 9700 / RFC 6819)
+Dynamic client registration ([RFC 7591](https://www.rfc-editor.org/rfc/rfc7591))
+and [Client ID Metadata Documents](client-id-metadata-documents.md) register
+public clients for the `authorization_code` grant, with `refresh_token` when
+the server supports it. They cannot register a client for
+`client_credentials` or set a secret, so `:supported_grants` narrows what
+they may request, and both require `:authorization_code` in the list.
 
-Aligned with OAuth security BCPs for this grant:
+## Security notes
 
-- **Confidential clients only** — public / `auth_method: none` clients are
-  rejected; DCR cannot register `client_credentials` secrets
-  (RFC 6819 §5.2.3.1).
-- **No credentials in the URI** — `client_id` / `client_secret` (and
-  assertion params) in the query string are rejected; only the request body
-  or `Authorization` header may carry them (RFC 6749 §2.3.1 /
-  RFC 6819 §4.3.3).
-- **Uniform `invalid_client`** — unknown clients, ineligible grant, and bad
-  secrets all map to the same error, with a timing pad on early rejects so
-  client-id enumeration is harder (RFC 6819 / RFC 9700).
-- **Audience-bound tokens** — every access token carries `aud` = the URL of
-  the one resource it was issued for; resource plugs reject other audiences,
-  so a token for one resource cannot be replayed at another
-  (RFC 9700 §2.3 / RFC 6819 §5.1.5.5).
-- **Least privilege** — scopes are enforced against the resource's scopes and
-  the client allow-list; bearer plugs re-check both on each request
-  (RFC 9700 §2.3).
-- **Header-only bearer tokens** — protected-resource metadata advertises
-  `bearer_methods_supported: ["header"]`; query/form bearer tokens are not
-  accepted (RFC 6750 / RFC 9700).
-- **Short-lived access tokens** — default lifetime is one hour; tune
-  `:access_token_lifetime` down for higher-risk APIs (no refresh token on
-  this grant — clients re-authenticate) (RFC 6819 §5.1.5.3).
-- **Secret handling** — default storage is a SHA-256 digest of a
-  high-entropy secret (`ClientSecret`). Prefer hashing/cloaking at rest;
-  never log plaintext. RFC 9700 §2.5 recommends asymmetric client
-  authentication (`private_key_jwt` / mTLS) when you can — symmetric
-  secrets remain supported but are the weaker option. Sender-constrained
-  access tokens (DPoP / certificate-bound) are not implemented yet; rely
-  on short lifetimes, audience binding, and TLS.
-- **Rate-limit** `/oauth/token` and `/oauth/register` at the edge (Hammer,
-  PlugAttack, reverse proxy) against online secret guessing
-  (RFC 6819 §5.1.4.2). The library does not ship a rate limiter.
-- **Do not** put open CORS credentials on the token endpoint for browser
-  clients that are not supposed to hold machine secrets.
-- **Password / implicit grants** are not offered — consistent with
-  RFC 9700 §2.1.2 / §2.4.
+* The grant is limited to confidential clients
+  ([RFC 6749 section 4.4](https://www.rfc-editor.org/rfc/rfc6749#section-4.4)).
+* Credentials are accepted in the `Authorization` header or the request
+  body, never in the query string
+  ([RFC 6749 section 2.3.1](https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1)).
+* Access tokens are bound to one resource and are short-lived; tune
+  `:access_token_lifetime` for your APIs
+  ([RFC 9700 section 2.3](https://www.rfc-editor.org/rfc/rfc9700#section-2.3)).
+* Secrets are stored as a digest. RFC 9700 recommends asymmetric client
+  authentication (`private_key_jwt`, mTLS), which this library does not
+  implement yet.
+* Rate-limit `/oauth/token` against online secret guessing. The library
+  does not ship a rate limiter; see `AshAuthentication.Oauth2Server`.

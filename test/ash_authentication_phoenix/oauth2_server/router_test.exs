@@ -1242,7 +1242,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert is_binary(Jason.decode!(conn.resp_body)["access_token"])
     end
 
-    test "accepts HTTP Basic when client is registered for client_secret_post" do
+    test "rejects HTTP Basic from a client registered for client_secret_post" do
       client = create_machine_client("client_secret_post")
       basic = Base.encode64("#{client.id}:#{@machine_secret}")
 
@@ -1252,11 +1252,17 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
         |> put_req_header("authorization", "Basic #{basic}")
         |> call_machine_protocol()
 
-      assert conn.status == 200
-      assert is_binary(Jason.decode!(conn.resp_body)["access_token"])
+      # RFC 6749 §5.2: unsupported authentication method, with the challenge
+      # that the Authorization header requires.
+      assert conn.status == 401
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+
+      assert get_resp_header(conn, "www-authenticate") == [
+               ~s|Basic realm="https://app.example.com"|
+             ]
     end
 
-    test "accepts body credentials when client is registered for client_secret_basic" do
+    test "rejects body credentials from a client registered for client_secret_basic" do
       client = create_machine_client("client_secret_basic")
 
       conn =
@@ -1269,8 +1275,46 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
         |> put_req_header("content-type", "application/x-www-form-urlencoded")
         |> call_machine_protocol()
 
-      assert conn.status == 200
-      assert is_binary(Jason.decode!(conn.resp_body)["access_token"])
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+      assert get_resp_header(conn, "www-authenticate") == []
+    end
+
+    test "unauthorized_client for a client without the grant" do
+      client =
+        OAuthClient
+        |> Ash.Changeset.for_create(:register_client_credentials, %{
+          client_name: "Router Confidential",
+          redirect_uris: ["https://app.example.com/cb"],
+          grant_types: ["authorization_code"],
+          response_types: ["code"],
+          token_endpoint_auth_method: "client_secret_post",
+          scope: "my-scope",
+          client_secret_hash: ClientSecrets.hash(@machine_secret)
+        })
+        |> Ash.create!(domain: Domain, context: %{private: %{ash_authentication?: true}})
+
+      conn =
+        conn(:post, "/token", %{
+          "grant_type" => "client_credentials",
+          "client_id" => client.id,
+          "client_secret" => @machine_secret
+        })
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_machine_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "unauthorized_client"
+    end
+
+    test "invalid_client without any client authentication" do
+      conn =
+        conn(:post, "/token", %{"grant_type" => "client_credentials", "scope" => "my-scope"})
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call_machine_protocol()
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
     end
 
     test "bad secret returns 400 invalid_client without WWW-Authenticate for body auth" do
@@ -1320,26 +1364,6 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
 
       assert conn.status == 400
       assert Jason.decode!(conn.resp_body)["error"] == "unsupported_grant_type"
-    end
-
-    test "rejects JSON body on the token endpoint (RFC 6749 form-urlencoded)" do
-      client = create_machine_client()
-
-      conn =
-        conn(
-          :post,
-          "/token",
-          Jason.encode!(%{
-            "grant_type" => "client_credentials",
-            "client_id" => client.id,
-            "client_secret" => @machine_secret
-          })
-        )
-        |> put_req_header("content-type", "application/json")
-        |> call_machine_protocol()
-
-      assert conn.status == 400
-      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
     end
 
     test "rejects client credentials in the query string (RFC 6749 §2.3.1)" do

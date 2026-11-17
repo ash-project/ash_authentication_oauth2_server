@@ -40,9 +40,7 @@ defmodule AshAuthentication.Oauth2Server.SmokeTest do
       access_token_lifetime: {15, :minutes},
       refresh_token_lifetime: {7, :days},
       scopes: ["mcp", "read"],
-      dcr_enabled?: true,
-      # Opt out so this smoke suite covers the disabled-CC metadata path.
-      verify_client_secret: nil
+      dcr_enabled?: true
   end
 
   describe "configuration resolution" do
@@ -239,17 +237,18 @@ defmodule AshAuthentication.Oauth2Server.SmokeTest do
       assert doc["registration_endpoint"] == issuer <> "/oauth/register"
       assert doc["revocation_endpoint"] == issuer <> "/oauth/revoke"
       assert doc["response_types_supported"] == ["code"]
-      # TestServer / Oauth2ServerTest.Server set `verify_client_secret: nil`.
-      assert doc["grant_types_supported"] == [
-               "authorization_code",
-               "refresh_token"
-             ]
-
+      # The default `:supported_grants`.
+      assert doc["grant_types_supported"] == ["authorization_code", "refresh_token"]
       assert doc["code_challenge_methods_supported"] == ["S256"]
-      assert doc["token_endpoint_auth_methods_supported"] == ["none"]
+
+      assert doc["token_endpoint_auth_methods_supported"] == [
+               "none",
+               "client_secret_basic",
+               "client_secret_post"
+             ]
     end
 
-    test "authorization_server/1 advertises client_credentials by default" do
+    test "authorization_server/1 advertises the configured grants" do
       doc = Metadata.authorization_server(Oauth2ServerTest.MachineServer)
 
       assert doc["grant_types_supported"] == [
@@ -257,12 +256,17 @@ defmodule AshAuthentication.Oauth2Server.SmokeTest do
                "refresh_token",
                "client_credentials"
              ]
+    end
 
-      assert doc["token_endpoint_auth_methods_supported"] == [
-               "none",
-               "client_secret_basic",
-               "client_secret_post"
-             ]
+    test "authorization_server/1 has no authorization endpoint without authorization_code" do
+      doc = Metadata.authorization_server(Oauth2ServerTest.ClientCredentialsOnlyServer)
+
+      assert doc["grant_types_supported"] == ["client_credentials"]
+      assert doc["response_types_supported"] == []
+      refute Map.has_key?(doc, "authorization_endpoint")
+      refute Map.has_key?(doc, "code_challenge_methods_supported")
+      refute Map.has_key?(doc, "authorization_response_iss_parameter_supported")
+      assert doc["token_endpoint"] == TestServer.issuer_url() <> "/oauth/token"
     end
 
     test "authorization_server/1 omits registration_endpoint when DCR is disabled" do

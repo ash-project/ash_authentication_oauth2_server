@@ -118,7 +118,7 @@ defmodule AshAuthentication.Oauth2Server.Register do
     attrs = %{
       client_name: Map.get(params, "client_name", "Unnamed Client"),
       redirect_uris: Map.fetch!(params, "redirect_uris"),
-      grant_types: ClientMetadata.narrow_grant_types(params),
+      grant_types: ClientMetadata.narrow_grant_types(params, server),
       response_types: Map.get(params, "response_types", ["code"]),
       token_endpoint_auth_method: Map.get(params, "token_endpoint_auth_method", "none"),
       scope: Enum.join(server.scopes(), " ")

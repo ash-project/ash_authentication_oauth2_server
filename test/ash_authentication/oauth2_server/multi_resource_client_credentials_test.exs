@@ -11,9 +11,9 @@ defmodule AshAuthentication.Oauth2Server.MultiResourceClientCredentialsTest do
   use ExUnit.Case, async: false
 
   alias AshAuthentication.Oauth2Server.{Jwt, Token}
-  alias AshAuthentication.Phoenix.Oauth2Server.ClientBearerPlug
-  alias Oauth2ServerTest.MultiResourceServer, as: Server
+  alias AshAuthentication.Phoenix.Oauth2Server.BearerPlug
   alias Oauth2ServerTest.{ClientSecrets, Domain, OAuthClient}
+  alias Oauth2ServerTest.MultiResourceServer, as: Server
 
   @mcp "https://app.example.com/mcp"
   @gql "https://app.example.com/gql"
@@ -49,7 +49,7 @@ defmodule AshAuthentication.Oauth2Server.MultiResourceClientCredentialsTest do
   defp call_plug(token, resource) do
     Plug.Test.conn(:get, "/")
     |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
-    |> ClientBearerPlug.call(ClientBearerPlug.init(oauth2_server: Server, resource: resource))
+    |> BearerPlug.call(BearerPlug.init(oauth2_server: Server, resource: resource))
   end
 
   describe "resource selection" do
@@ -145,7 +145,7 @@ defmodule AshAuthentication.Oauth2Server.MultiResourceClientCredentialsTest do
     end
   end
 
-  describe "ClientBearerPlug" do
+  describe "BearerPlug" do
     setup %{client: client} do
       {:ok, %{access_token: mcp_token}} =
         issue(client, %{"resource" => @mcp, "scope" => "mcp"})
@@ -184,7 +184,7 @@ defmodule AshAuthentication.Oauth2Server.MultiResourceClientCredentialsTest do
 
     test "requires :resource at plug init" do
       assert_raise ArgumentError, ~r/more than one resource/, fn ->
-        ClientBearerPlug.init(oauth2_server: Server)
+        BearerPlug.init(oauth2_server: Server)
       end
     end
 

@@ -19,8 +19,7 @@ defmodule AshAuthentication.Oauth2Server.ClientSecret do
 
   `:verify_client_secret` on `AshAuthentication.Oauth2Server` defaults to
   `{AshAuthentication.Oauth2Server.ClientSecret, :verify, []}`. Override
-  with a custom MFA/fun for KMS, etc., or set
-  `verify_client_secret: nil` to disable the `client_credentials` grant.
+  with a custom MFA or function to verify against a KMS or another store.
   """
 
   @hash_attribute :client_secret_hash

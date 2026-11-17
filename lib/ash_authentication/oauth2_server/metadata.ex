@@ -47,27 +47,34 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
   @spec authorization_server(server :: module(), context :: map()) :: map()
   def authorization_server(server, context \\ %{}) do
     issuer = server.issuer_url(context)
-    client_credentials? = server.client_credentials_enabled?()
+    grants = server.supported_grants()
+    authorization_code? = :authorization_code in grants
 
     base = %{
       "issuer" => issuer,
-      "authorization_endpoint" => issuer <> "/oauth/authorize",
       "token_endpoint" => issuer <> "/oauth/token",
       "revocation_endpoint" => issuer <> "/oauth/revoke",
-      "response_types_supported" => ["code"],
-      # Only advertise `client_credentials` when `:verify_client_secret` is
-      # set (library default: `ClientSecret.verify/2`). Pass `nil` to disable.
-      "grant_types_supported" => grant_types_supported(client_credentials?),
-      "code_challenge_methods_supported" => ["S256"],
-      "token_endpoint_auth_methods_supported" =>
-        token_endpoint_auth_methods_supported(client_credentials?),
-      "scopes_supported" => server.scopes(),
-      # RFC 9207 — we include `iss` in every authorization response, and
-      # advertising that is a MUST once we do (RFC 9207 §2.3).
-      "authorization_response_iss_parameter_supported" => true
+      # RFC 8414 §2: `response_types_supported` is required. Without the
+      # authorization code grant there is no authorization endpoint and no
+      # response type.
+      "response_types_supported" => if(authorization_code?, do: ["code"], else: []),
+      "grant_types_supported" => Enum.map(grants, &Atom.to_string/1),
+      # Confidential clients authenticate with a secret on every grant
+      # (RFC 6749 §2.3.1), public clients with `client_id` only.
+      "token_endpoint_auth_methods_supported" => [
+        "none",
+        "client_secret_basic",
+        "client_secret_post"
+      ],
+      "scopes_supported" => server.scopes()
     }
 
     base
+    |> put_if(authorization_code?, "authorization_endpoint", issuer <> "/oauth/authorize")
+    |> put_if(authorization_code?, "code_challenge_methods_supported", ["S256"])
+    # RFC 9207 — we include `iss` in every authorization response, and
+    # advertising that is a MUST once we do (RFC 9207 §2.3).
+    |> put_if(authorization_code?, "authorization_response_iss_parameter_supported", true)
     # Only advertise the DCR endpoint when it's actually enabled.
     # Clients use this field to decide whether to attempt registration.
     |> put_if(server.dcr_enabled?(), "registration_endpoint", issuer <> "/oauth/register")
@@ -75,20 +82,6 @@ defmodule AshAuthentication.Oauth2Server.Metadata do
     # back to DCR / pre-registration when it's absent).
     |> put_if(server.cimd_enabled?(), "client_id_metadata_document_supported", true)
   end
-
-  defp grant_types_supported(true),
-    do: ["authorization_code", "refresh_token", "client_credentials"]
-
-  defp grant_types_supported(false),
-    do: ["authorization_code", "refresh_token"]
-
-  # Secret-based token-endpoint auth is only meaningful once confidential
-  # clients (client_credentials) are configured on this server.
-  defp token_endpoint_auth_methods_supported(true),
-    do: ["none", "client_secret_basic", "client_secret_post"]
-
-  defp token_endpoint_auth_methods_supported(false),
-    do: ["none"]
 
   defp put_if(map, true, key, value), do: Map.put(map, key, value)
   defp put_if(map, false, _key, _value), do: map

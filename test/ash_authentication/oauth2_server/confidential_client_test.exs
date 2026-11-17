@@ -9,16 +9,18 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
   `refresh_token` grants too (RFC 6749 §4.1.3 / §6), and a failed
   authentication must not burn the code or rotate the refresh token.
 
-  Also covers `grant_types` enforcement on the user-delegated flow and
-  the machine-vs-person token distinction (`gty` claim).
+  Also covers the binding of the presented credentials to the registered
+  `token_endpoint_auth_method`, `grant_types` enforcement on the
+  user-delegated flow, and the machine-vs-person token distinction (`gty`
+  claim) in `BearerPlug`.
   """
   use ExUnit.Case, async: true
 
   import Plug.Test
   import Plug.Conn
 
-  alias AshAuthentication.Oauth2Server.{Authorize, Jwt, PKCE, Token}
-  alias AshAuthentication.Phoenix.Oauth2Server.{BearerPlug, ClientBearerPlug, ProtocolRouter}
+  alias AshAuthentication.Oauth2Server.{Authorize, ClientAuth, Jwt, PKCE, Token}
+  alias AshAuthentication.Phoenix.Oauth2Server.{BearerPlug, ProtocolRouter}
   alias Oauth2ServerTest.{ClientSecrets, Domain, MachineServer, OAuthClient, User}
 
   @secret "super-secret-confidential-credential"
@@ -33,7 +35,9 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
       })
       |> Ash.create!(domain: Domain)
 
-    %{user: user, client: create_client("client_secret_basic")}
+    # The tests that call `Token` directly present the secret in the body,
+    # so the default client registered `client_secret_post`.
+    %{user: user, client: create_client("client_secret_post")}
   end
 
   defp create_client(auth_method, grant_types \\ ["authorization_code", "refresh_token"]) do
@@ -132,10 +136,36 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
       client = create_client("none")
       {code, verifier} = issue_code(client, user)
 
-      assert {:error, :unsupported_client_authentication} =
+      assert {:error, :invalid_client} =
                Token.exchange_authorization_code(
                  MachineServer,
                  code_params(client, code, verifier, %{"client_secret" => "ignored"})
+               )
+
+      assert {:ok, _} =
+               Token.exchange_authorization_code(
+                 MachineServer,
+                 code_params(client, code, verifier)
+               )
+    end
+
+    test "the secret must come with the registered method", %{user: user} do
+      client = create_client("client_secret_post")
+      {code, verifier} = issue_code(client, user)
+      params = code_params(client, code, verifier)
+
+      auth = %ClientAuth{
+        client_id: client.id,
+        client_secret: @secret,
+        method: :client_secret_basic
+      }
+
+      assert {:error, :invalid_client} =
+               Token.exchange_authorization_code(MachineServer, params, client_auth: auth)
+
+      assert {:ok, _} =
+               Token.exchange_authorization_code(MachineServer, params,
+                 client_auth: %{auth | method: :client_secret_post}
                )
     end
 
@@ -230,11 +260,10 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
                Authorize.validate_request(MachineServer, authorize_params(client))
     end
 
-    test "authorize rejects a client with an explicitly empty grant list" do
+    test "authorize treats an empty grant list as the RFC 7591 default" do
       client = create_client("none", [])
 
-      assert {:error, "unauthorized_client", _} =
-               Authorize.validate_request(MachineServer, authorize_params(client))
+      assert {:ok, _} = Authorize.validate_request(MachineServer, authorize_params(client))
     end
 
     test "authorize treats nil grant_types as the RFC 7591 default" do
@@ -306,6 +335,10 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
   end
 
   describe "POST /token client authentication" do
+    setup do
+      %{basic: create_client("client_secret_basic")}
+    end
+
     defp post_token(params, headers \\ []) do
       conn = conn(:post, "/token", params)
 
@@ -315,7 +348,7 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
       |> ProtocolRouter.call(@protocol_opts)
     end
 
-    test "accepts HTTP Basic on the authorization_code grant", %{client: client, user: user} do
+    test "accepts HTTP Basic on the authorization_code grant", %{basic: client, user: user} do
       {code, verifier} = issue_code(client, user)
       basic = Base.encode64("#{client.id}:#{@secret}")
 
@@ -348,6 +381,81 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
 
       assert conn.status == 400
       assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    end
+
+    test "Basic with a body client_id naming the same client is accepted",
+         %{basic: client, user: user} do
+      {code, verifier} = issue_code(client, user)
+      basic = Base.encode64("#{client.id}:#{@secret}")
+
+      conn =
+        post_token(code_params(client, code, verifier), [{"authorization", "Basic #{basic}"}])
+
+      assert conn.status == 200
+    end
+
+    test "a public client sending Basic gets 401 invalid_client with a challenge", %{user: user} do
+      client = create_client("none")
+      {code, verifier} = issue_code(client, user)
+      basic = Base.encode64("#{client.id}:anything")
+
+      conn =
+        post_token(code_params(client, code, verifier), [{"authorization", "Basic #{basic}"}])
+
+      assert conn.status == 401
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+
+      assert [~s|Basic realm="https://app.example.com"|] =
+               get_resp_header(conn, "www-authenticate")
+    end
+
+    test "a client_secret_post client sending Basic gets 401 invalid_client", %{user: user} do
+      client = create_client("client_secret_post")
+      {code, verifier} = issue_code(client, user)
+      basic = Base.encode64("#{client.id}:#{@secret}")
+
+      conn =
+        post_token(code_params(client, code, verifier), [{"authorization", "Basic #{basic}"}])
+
+      assert conn.status == 401
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+    end
+
+    test "a client_secret_basic client sending body credentials gets invalid_client",
+         %{basic: client, user: user} do
+      {code, verifier} = issue_code(client, user)
+
+      conn = post_token(code_params(client, code, verifier, %{"client_secret" => @secret}))
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_client"
+    end
+
+    test "revocation authenticates the client the same way", %{basic: client, user: user} do
+      {code, verifier} = issue_code(client, user)
+      basic = Base.encode64("#{client.id}:#{@secret}")
+
+      {:ok, %{refresh_token: refresh}} =
+        Token.exchange_authorization_code(MachineServer, code_params(client, code, verifier),
+          client_auth: %ClientAuth{
+            client_id: client.id,
+            client_secret: @secret,
+            method: :client_secret_basic
+          }
+        )
+
+      revoke = fn params, headers ->
+        headers
+        |> Enum.reduce(conn(:post, "/revoke", params), fn {k, v}, c -> put_req_header(c, k, v) end)
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> ProtocolRouter.call(@protocol_opts)
+      end
+
+      denied = revoke.(%{"token" => refresh, "client_id" => client.id}, [])
+      assert denied.status == 400
+      assert Jason.decode!(denied.resp_body)["error"] == "invalid_client"
+
+      assert revoke.(%{"token" => refresh}, [{"authorization", "Basic #{basic}"}]).status == 200
     end
   end
 
@@ -385,7 +493,7 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
       refute Map.has_key?(claims, "gty")
     end
 
-    test "BearerPlug rejects any token carrying gty, even when sub != client_id",
+    test "BearerPlug rejects a token carrying gty when sub != client_id",
          %{user: user, machine: machine} do
       {:ok, token, _} =
         Jwt.mint(MachineServer,
@@ -404,20 +512,21 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
       assert Ash.PlugHelpers.get_actor(conn) == nil
     end
 
-    test "ClientBearerPlug rejects sub == client_id without gty", %{machine: machine} do
+    test "BearerPlug treats sub == client_id without gty as a user token", %{machine: machine} do
       {:ok, token, _} =
         Jwt.mint(MachineServer, sub: machine.id, client_id: machine.id, scope: "my-scope")
 
       conn =
         conn(:get, "/")
         |> put_req_header("authorization", "Bearer #{token}")
-        |> ClientBearerPlug.call(ClientBearerPlug.init(oauth2_server: MachineServer))
+        |> BearerPlug.call(BearerPlug.init(oauth2_server: MachineServer))
 
+      # No user has the client's id.
       assert conn.status == 401
       assert Ash.PlugHelpers.get_actor(conn) == nil
     end
 
-    test "ClientBearerPlug accepts a real machine token", %{machine: machine} do
+    test "BearerPlug loads the client for a machine token", %{machine: machine} do
       {:ok, %{access_token: at}} =
         Token.exchange_client_credentials(MachineServer, %{
           "client_id" => machine.id,
@@ -427,10 +536,11 @@ defmodule AshAuthentication.Oauth2Server.ConfidentialClientTest do
       conn =
         conn(:get, "/")
         |> put_req_header("authorization", "Bearer #{at}")
-        |> ClientBearerPlug.call(ClientBearerPlug.init(oauth2_server: MachineServer))
+        |> BearerPlug.call(BearerPlug.init(oauth2_server: MachineServer))
 
       refute conn.halted
-      assert Ash.PlugHelpers.get_actor(conn).id == machine.id
+      assert %OAuthClient{id: id} = Ash.PlugHelpers.get_actor(conn)
+      assert id == machine.id
     end
   end
 end

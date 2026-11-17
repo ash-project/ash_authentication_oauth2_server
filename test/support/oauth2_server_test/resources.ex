@@ -288,8 +288,9 @@ end
 
 defmodule Oauth2ServerTest.Server do
   @moduledoc """
-  Authorization-code-oriented test server. Explicitly disables
-  `client_credentials` so metadata/smoke tests cover the opt-out path.
+  Authorization-code-oriented test server with the default
+  `:supported_grants`, so metadata/smoke tests cover a server without
+  `client_credentials`.
   """
 
   use AshAuthentication.Oauth2Server,
@@ -303,8 +304,7 @@ defmodule Oauth2ServerTest.Server do
     refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
     consent_resource: Oauth2ServerTest.OAuthConsent,
     scopes: ["mcp"],
-    dcr_enabled?: true,
-    verify_client_secret: nil
+    dcr_enabled?: true
 end
 
 defmodule Oauth2ServerTest.ClientSecrets do
@@ -317,7 +317,8 @@ end
 
 defmodule Oauth2ServerTest.MachineServer do
   @moduledoc """
-  Server with default `ClientSecret` verification and an events scope.
+  Server with every grant, including `client_credentials`, and the default
+  `ClientSecret` verification.
   """
 
   use AshAuthentication.Oauth2Server,
@@ -330,7 +331,8 @@ defmodule Oauth2ServerTest.MachineServer do
     authorization_code_resource: Oauth2ServerTest.OAuthAuthorizationCode,
     refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
     consent_resource: Oauth2ServerTest.OAuthConsent,
-    scopes: ["mcp", "my-scope"]
+    scopes: ["mcp", "my-scope"],
+    supported_grants: [:authorization_code, :refresh_token, :client_credentials]
 end
 
 defmodule Oauth2ServerTest.MachineServerWithExtras do
@@ -349,7 +351,49 @@ defmodule Oauth2ServerTest.MachineServerWithExtras do
     refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
     consent_resource: Oauth2ServerTest.OAuthConsent,
     scopes: ["mcp", "my-scope"],
+    supported_grants: [:authorization_code, :refresh_token, :client_credentials],
     extra_access_token_claims: {Oauth2ServerTest.ExtraClaims, :for_machine, []}
+end
+
+defmodule Oauth2ServerTest.ClientCredentialsOnlyServer do
+  @moduledoc """
+  A server for machine clients only: `client_credentials` is the one grant,
+  so there is no authorization endpoint.
+  """
+
+  use AshAuthentication.Oauth2Server,
+    otp_app: :ash_authentication_oauth2_server,
+    user_resource: Oauth2ServerTest.User,
+    issuer_url: {Oauth2ServerTest.Secrets, []},
+    resource_url: {Oauth2ServerTest.Secrets, []},
+    signing_secret: {Oauth2ServerTest.Secrets, []},
+    client_resource: Oauth2ServerTest.OAuthClient,
+    authorization_code_resource: Oauth2ServerTest.OAuthAuthorizationCode,
+    refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
+    consent_resource: Oauth2ServerTest.OAuthConsent,
+    scopes: ["mcp", "my-scope"],
+    supported_grants: [:client_credentials]
+end
+
+defmodule Oauth2ServerTest.NoRefreshServer do
+  @moduledoc """
+  A server with the authorization code grant alone: no refresh tokens are
+  issued, and the `refresh_token` grant is unsupported.
+  """
+
+  use AshAuthentication.Oauth2Server,
+    otp_app: :ash_authentication_oauth2_server,
+    user_resource: Oauth2ServerTest.User,
+    issuer_url: {Oauth2ServerTest.Secrets, []},
+    resource_url: {Oauth2ServerTest.Secrets, []},
+    signing_secret: {Oauth2ServerTest.Secrets, []},
+    client_resource: Oauth2ServerTest.OAuthClient,
+    authorization_code_resource: Oauth2ServerTest.OAuthAuthorizationCode,
+    refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
+    consent_resource: Oauth2ServerTest.OAuthConsent,
+    scopes: ["mcp"],
+    dcr_enabled?: true,
+    supported_grants: [:authorization_code]
 end
 
 defmodule Oauth2ServerTest.ExtraClaims do
@@ -382,7 +426,8 @@ defmodule Oauth2ServerTest.MultiResourceServer do
     refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
     consent_resource: Oauth2ServerTest.OAuthConsent,
     scopes: ["mcp", "gql"],
-    dcr_enabled?: true
+    dcr_enabled?: true,
+    supported_grants: [:authorization_code, :refresh_token, :client_credentials]
 end
 
 defmodule Oauth2ServerTest.GatedServer do

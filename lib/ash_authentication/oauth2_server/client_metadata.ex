@@ -72,26 +72,29 @@ defmodule AshAuthentication.Oauth2Server.ClientMetadata do
   @doc """
   The subset of the client's requested `grant_types` this server supports —
   what actually gets registered. Defaults to `["authorization_code"]` when
-  the field is absent.
+  the field is absent. Registration covers the grants of a public client,
+  `authorization_code` and `refresh_token`, limited to the server's
+  `:supported_grants`; `client_credentials` clients are created by the
+  application.
   """
-  @spec narrow_grant_types(map()) :: [String.t()]
-  def narrow_grant_types(params) do
+  @spec narrow_grant_types(map(), module()) :: [String.t()]
+  def narrow_grant_types(params, server) do
     params
     |> Map.get("grant_types", ["authorization_code"])
-    |> Enum.filter(&(&1 in @valid_grant_types))
+    |> Enum.filter(&(&1 in @valid_grant_types and server.grant_supported?(&1)))
   end
 
   @doc """
   The grant types a stored client row is allowed to use.
 
-  A `nil` `grant_types` attribute means the RFC 7591 §2 default,
-  `["authorization_code"]`. An explicit empty list means no grants.
+  A client without registered grant types has the RFC 7591 §2 default,
+  `["authorization_code"]`.
   """
   @spec allowed_grant_types(map()) :: [String.t()]
   def allowed_grant_types(client) do
     case Map.get(client, :grant_types) do
-      nil -> ["authorization_code"]
-      grants -> List.wrap(grants)
+      [_ | _] = grants -> grants
+      _ -> ["authorization_code"]
     end
   end
 

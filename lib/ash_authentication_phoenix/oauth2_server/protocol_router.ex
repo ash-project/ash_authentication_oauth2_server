@@ -14,8 +14,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
       document for each configured resource
     * `GET /openid-configuration`       — alias for OIDC-conformant tooling
     * `POST /register`                  — RFC 7591 Dynamic Client Registration
-    * `POST /token`                     — authorization_code, refresh_token,
-                                         and client_credentials grants
+    * `POST /token`                     — the grants in the server's
+                                         `:supported_grants`
     * `POST /revoke`                    — RFC 7009 token revocation
 
   Mount this behind your API pipeline (no CSRF, no session needed). For the
@@ -30,7 +30,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   use Plug.Router, copy_opts_to_assign: :oauth2_server_router_opts
 
   alias AshAuthentication.Oauth2Server.{ClientAuth, Metadata, Register, Token}
-  alias AshAuthentication.Phoenix.Oauth2Server.{Bearer, Errors}
+  alias AshAuthentication.Phoenix.Oauth2Server.{BearerPlug, Errors}
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :json],
@@ -157,30 +157,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   post "/token" do
     conn = fetch_query_params(conn)
     server = server!(conn.assigns.oauth2_server_router_opts)
-    params = conn.params || %{}
-    opts = client_request_opts(conn)
+    params = conn.params
 
     result =
-      with :ok <- reject_credentials_in_query(conn) do
+      with :ok <- reject_credentials_in_query(conn),
+           {:ok, auth} <- ClientAuth.parse(conn, params) do
+        opts = [client_auth: auth] ++ tenant_opts(conn)
+
+        # Each grant checks that it is in the server's `:supported_grants`.
         case Map.get(params, "grant_type") do
-          "authorization_code" ->
-            with {:ok, params} <- merge_client_auth(conn, params) do
-              Token.exchange_authorization_code(server, params, opts)
-            end
-
-          "refresh_token" ->
-            with {:ok, params} <- merge_client_auth(conn, params) do
-              Token.exchange_refresh_token(server, params, opts)
-            end
-
-          "client_credentials" ->
-            client_credentials(server, conn, params, opts)
-
-          type when type in [nil, ""] ->
-            {:error, :invalid_request}
-
-          _ ->
-            {:error, :unsupported_grant_type}
+          "authorization_code" -> Token.exchange_authorization_code(server, params, opts)
+          "refresh_token" -> Token.exchange_refresh_token(server, params, opts)
+          "client_credentials" -> Token.exchange_client_credentials(server, params, opts)
+          type when type in [nil, ""] -> {:error, :invalid_request}
+          _ -> {:error, :unsupported_grant_type}
         end
       end
 
@@ -208,53 +198,12 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     client_id client_secret client_assertion client_assertion_type
   )
 
-  # Public clients send only a body `client_id`; confidential clients also
-  # present a secret via Basic or the body. Normalize either presentation
-  # into `client_id` + `client_secret` params so `Token` can authenticate
-  # confidential clients (RFC 6749 §4.1.3 / §6).
-  defp merge_client_auth(conn, params) do
-    case ClientAuth.optional_credentials(conn, params) do
-      :none ->
-        {:ok, params}
-
-      {:ok, client_id, client_secret, _via} ->
-        {:ok, Map.merge(params, %{"client_id" => client_id, "client_secret" => client_secret})}
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
   defp reject_credentials_in_query(conn) do
-    qp = conn.query_params || %{}
+    qp = conn.query_params
 
     if Enum.any?(@token_credential_query_params, &Map.has_key?(qp, &1)),
       do: {:error, :invalid_request},
       else: :ok
-  end
-
-  # Disabled when the server has no `verify_client_secret` configured. The
-  # credentials come from HTTP Basic or the body; confidential clients may use
-  # either (see `Token.exchange_client_credentials/3`).
-  # RFC 6749 §4.4.2: the client credentials request is form-urlencoded. Client
-  # secrets are not accepted in a JSON body.
-  defp require_form_urlencoded(conn) do
-    case get_req_header(conn, "content-type") do
-      ["application/x-www-form-urlencoded" <> _ | _] -> :ok
-      _ -> {:error, :invalid_request}
-    end
-  end
-
-  defp client_credentials(server, conn, params, opts) do
-    if server.client_credentials_enabled?() do
-      with :ok <- require_form_urlencoded(conn),
-           {:ok, client_id, client_secret, _via} <- ClientAuth.credentials(conn, params) do
-        params = Map.merge(params, %{"client_id" => client_id, "client_secret" => client_secret})
-        Token.exchange_client_credentials(server, params, opts)
-      end
-    else
-      {:error, :unsupported_grant_type}
-    end
   end
 
   # ── revocation (RFC 7009) ──────────────────────────────────────────────────
@@ -265,9 +214,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   post "/revoke" do
     server = server!(conn.assigns.oauth2_server_router_opts)
 
+    params = conn.params
+
     result =
-      with {:ok, params} <- merge_client_auth(conn, conn.params || %{}) do
-        Token.revoke(server, params, client_request_opts(conn))
+      with {:ok, auth} <- ClientAuth.parse(conn, params) do
+        Token.revoke(server, params, [client_auth: auth] ++ tenant_opts(conn))
       end
 
     case result do
@@ -315,31 +266,24 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     end
   end
 
-  defp client_request_opts(conn) do
-    [authorization_scheme: authorization_scheme(conn)] ++ tenant_opts(conn)
-  end
-
-  defp authorization_scheme(conn) do
-    case Plug.Conn.get_req_header(conn, "authorization") do
-      [header | _] -> header |> String.split(" ", parts: 2) |> hd() |> String.downcase()
-      [] -> nil
-    end
-  end
-
-  # OAuth 2.1 §3.2.4: when a client attempted authentication with the
-  # Authorization header, `invalid_client` MUST be a 401 with a challenge
-  # for the scheme the client used. RFC 7617 §2 requires `realm` in a Basic
-  # challenge.
+  # RFC 6749 §5.2: when the client attempted authentication with the
+  # `Authorization` header, `invalid_client` MUST be a 401 with a
+  # `WWW-Authenticate` challenge. HTTP Basic is the one header scheme this
+  # server supports, and RFC 7617 §2 requires `realm` in its challenge.
   defp send_token_error(conn, server, reason) do
-    case {Errors.describe_token_error(reason), authorization_scheme(conn)} do
-      {{_status, "invalid_client" = code, desc}, "basic"} ->
-        realm = server.issuer_url(secret_context(conn))
+    case Errors.describe_token_error(reason) do
+      {_status, "invalid_client" = code, desc} ->
+        if get_req_header(conn, "authorization") == [] do
+          Errors.send_oauth_error(conn, 400, code, desc)
+        else
+          realm = server.issuer_url(secret_context(conn))
 
-        conn
-        |> put_resp_header("www-authenticate", ~s|Basic realm="#{realm}"|)
-        |> Errors.send_oauth_error(401, code, desc)
+          conn
+          |> put_resp_header("www-authenticate", ~s|Basic realm="#{realm}"|)
+          |> Errors.send_oauth_error(401, code, desc)
+        end
 
-      {{status, code, desc}, _scheme} ->
+      {status, code, desc} ->
         Errors.send_oauth_error(conn, status, code, desc)
     end
   end
@@ -348,7 +292,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   # present. Used by `/register` to forward an RFC 7591 initial access
   # token into the protocol core.
   defp extract_bearer(conn) do
-    case Bearer.extract_token(conn) do
+    case BearerPlug.__parse_bearer__(conn) do
       {:ok, token} -> token
       _ -> nil
     end
