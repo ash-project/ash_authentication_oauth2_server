@@ -132,7 +132,7 @@ defmodule AshAuthentication.Oauth2Server.Expunger do
 
   # Interval is configured in hours; convert to milliseconds.
   defp interval_for(resource, extension) do
-    info_module = Module.concat(extension, Info)
+    info_module = Module.safe_concat(extension, Info)
     info_module.oauth2_server_expunge_interval!(resource) * 60 * 60 * 1000
   end
 end
