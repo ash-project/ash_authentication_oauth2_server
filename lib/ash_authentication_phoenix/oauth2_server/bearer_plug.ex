@@ -7,8 +7,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   Resource-server side bearer token validation.
 
   Validates an `Authorization: Bearer <jwt>` header against the configured
-  authorization server. On success, loads the user via `Ash.get/3` on the
-  configured `user_resource` and sets it as the conn's actor.
+  authorization server. On success, loads the token's subject and sets it
+  as the conn's actor: the user for a token from the `authorization_code`
+  or `refresh_token` grant, and the OAuth client for a token from the
+  `client_credentials` grant.
 
   ## Usage
 
@@ -49,10 +51,11 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   On success two things are set, and downstream code reads from each
   for different purposes:
 
-    * **`Ash.PlugHelpers.get_actor(conn)`** — the user record loaded
-      via `Ash.get/3` on the configured `user_resource` using the
-      token's `sub` claim. Use this for "who is this" (Ash policies,
-      tenant resolution, ownership checks).
+    * **`Ash.PlugHelpers.get_actor(conn)`** — the record loaded via
+      `Ash.get/3` using the token's `sub` claim: a record of the
+      configured `user_resource` for a user token, or of the configured
+      `client_resource` for a client credentials token. Use this for "who
+      is this" (Ash policies, tenant resolution, ownership checks).
     * **`conn.assigns.oauth_claims`** — the verified JWT claims map.
       Use this for "what is this bearer allowed to do" — most
       importantly the scope claim:
@@ -69,6 +72,23 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   up with the same actor but different `oauth_claims["scope"]`. This
   is the right OAuth semantic — the access token is a delegated grant
   from user → client, distinct from the user's own permissions.
+
+  ## Client credentials tokens
+
+  A token from the `client_credentials` grant represents the client
+  itself (RFC 9068 §2.2: `sub` is the client identifier). The server marks
+  such tokens with a `gty` claim of `"client_credentials"`, which user
+  tokens never carry and `:extra_access_token_claims` cannot set. The plug
+  loads the client record as the actor, so policies must be written for
+  both kinds of actor when a route accepts both. Check the actor's struct,
+  or the `gty` claim, to tell them apart.
+
+  Client tokens are accepted only while the server lists
+  `:client_credentials` in `:supported_grants`. On every request the plug
+  also reloads the client and checks that it still has the grant, may
+  still use the resource, and that the token's scopes are still inside
+  the client's allow-list, so revoking a client's access takes effect
+  before its tokens expire.
 
   ### Gating an action on a scope
 
@@ -113,8 +133,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   @behaviour Plug
   import Plug.Conn
 
-  alias AshAuthentication.Oauth2Server.Jwt
+  alias AshAuthentication.Oauth2Server.{Jwt, Token}
   alias AshAuthentication.Phoenix.Oauth2Server.Errors
+
+  @ash_context %{private: %{ash_authentication?: true}}
 
   @impl Plug
   def init(opts) do
@@ -150,10 +172,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
       {:ok, token} ->
         case verify_and_load(server, resource, token) do
-          {:ok, user, claims} ->
+          {:ok, actor, claims} ->
             conn
             |> maybe_set_tenant(claims)
-            |> Ash.PlugHelpers.set_actor(user)
+            |> Ash.PlugHelpers.set_actor(actor)
             |> assign(:oauth_claims, claims)
 
           {:error, reason} when required? ->
@@ -197,29 +219,81 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   end
 
   defp verify_and_load(server, resource, token) do
-    with {:ok, claims} <- Jwt.verify(server, token, resource: resource),
-         {:ok, user} <- load_user(server, claims) do
-      {:ok, user, claims}
+    with {:ok, claims} <- Jwt.verify(server, token, resource: resource) do
+      case claims do
+        %{"gty" => "client_credentials"} -> load_client(server, resource, claims)
+        %{"gty" => _} -> {:error, :invalid_token}
+        _ -> load_user(server, claims)
+      end
     end
   end
 
   defp load_user(server, %{"sub" => sub} = claims) when is_binary(sub) and sub != "" do
-    opts =
-      [context: %{private: %{ash_authentication?: true}}]
-      |> maybe_put_tenant_opt(claims)
-
-    case Ash.get(server.user_resource(), sub, opts) do
-      {:ok, user} -> {:ok, user}
+    case Ash.get(server.user_resource(), sub, ash_opts(claims)) do
+      {:ok, user} -> {:ok, user, claims}
       _ -> {:error, :user_not_found}
     end
   end
 
   defp load_user(_, _), do: {:error, :missing_subject}
 
-  defp maybe_put_tenant_opt(opts, %{"tenant" => tenant}) when is_binary(tenant) and tenant != "",
-    do: Keyword.put(opts, :tenant, tenant)
+  # A client credentials token names the client in both `sub` and
+  # `client_id` (RFC 9068 §2.2). The client is reloaded and re-checked so
+  # that removing the grant, the resource, or scopes from the client row
+  # takes effect before the token expires.
+  defp load_client(server, resource, %{"sub" => sub, "client_id" => sub} = claims)
+       when is_binary(sub) and sub != "" do
+    with :ok <- check_grant_supported(server),
+         {:ok, client} <- get_client(server, sub, claims),
+         :ok <- check_still_eligible(client),
+         :ok <- check_resource_still_allowed(server, resource, client),
+         :ok <- check_scopes_still_allowed(server, resource, client, claims) do
+      {:ok, client, claims}
+    end
+  end
 
-  defp maybe_put_tenant_opt(opts, _), do: opts
+  defp load_client(_, _, _), do: {:error, :invalid_token}
+
+  defp check_grant_supported(server) do
+    if server.grant_supported?(:client_credentials),
+      do: :ok,
+      else: {:error, :client_not_eligible}
+  end
+
+  defp get_client(server, client_id, claims) do
+    case Ash.get(server.client_resource(), client_id, ash_opts(claims)) do
+      {:ok, client} -> {:ok, client}
+      _ -> {:error, :client_not_found}
+    end
+  end
+
+  defp check_still_eligible(client) do
+    if Token.client_credentials_allowed?(client),
+      do: :ok,
+      else: {:error, :client_not_eligible}
+  end
+
+  # Without `:resource` the plug guards the only configured resource.
+  defp check_resource_still_allowed(server, resource, client) do
+    name = resource || server.resources() |> List.first()
+
+    if Token.client_resource_allowed?(client, name),
+      do: :ok,
+      else: {:error, :resource_not_allowed}
+  end
+
+  defp check_scopes_still_allowed(server, resource, client, %{"scope" => scope}) do
+    if Token.machine_scopes_allowed?(server, resource, client, scope),
+      do: :ok,
+      else: {:error, :scopes_no_longer_allowed}
+  end
+
+  defp check_scopes_still_allowed(_, _, _, _), do: {:error, :scopes_no_longer_allowed}
+
+  defp ash_opts(%{"tenant" => tenant}) when is_binary(tenant) and tenant != "",
+    do: [context: @ash_context, tenant: tenant]
+
+  defp ash_opts(_), do: [context: @ash_context]
 
   defp challenge(conn, server, resource, reason, scope) do
     status = if reason == :malformed, do: 400, else: 401
@@ -250,6 +324,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
       :invalid_audience -> {"invalid_token", "audience mismatch"}
       :invalid_issuer -> {"invalid_token", "issuer mismatch"}
       :expired -> {"invalid_token", "token expired"}
+      :client_not_found -> {"invalid_token", "client not found"}
+      :client_not_eligible -> {"invalid_token", "client credentials no longer allowed"}
+      :resource_not_allowed -> {"invalid_token", "client no longer allowed this resource"}
+      :scopes_no_longer_allowed -> {"invalid_token", "token scopes no longer allowed"}
       _ -> {"invalid_token", nil}
     end
   end

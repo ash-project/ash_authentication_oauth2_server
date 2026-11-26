@@ -226,7 +226,7 @@ defmodule AshAuthentication.Oauth2Server.CIMD do
       cimd_url: url,
       client_name: Map.fetch!(document, "client_name"),
       redirect_uris: Map.fetch!(document, "redirect_uris"),
-      grant_types: ClientMetadata.narrow_grant_types(document),
+      grant_types: ClientMetadata.narrow_grant_types(document, server),
       response_types: Map.get(document, "response_types", ["code"]),
       token_endpoint_auth_method: Map.get(document, "token_endpoint_auth_method", "none"),
       scope: Enum.join(server.scopes(), " ")

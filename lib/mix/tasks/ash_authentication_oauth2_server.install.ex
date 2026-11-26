@@ -216,6 +216,10 @@ if Code.ensure_loaded?(Igniter) do
         "--attribute",
         "scope:string:public",
         "--attribute",
+        "client_secret_hash:string:public",
+        "--attribute",
+        "allowed_resources:string:array:public",
+        "--attribute",
         "cimd_url:string:public",
         "--attribute",
         "last_used_at:utc_datetime_usec:public",
@@ -489,6 +493,10 @@ if Code.ensure_loaded?(Igniter) do
         # kept for backwards compatibility. Set to `false` if your auth
         # server is for a fixed set of first-party clients only.
         cimd_enabled?: true,
+        # The grants this server offers. Add `:client_credentials` for
+        # machine clients that hold a secret; see the "Client credentials"
+        # topic guide.
+        supported_grants: [:authorization_code, :refresh_token],
         sign_in_path: "/sign-in"
       """
 

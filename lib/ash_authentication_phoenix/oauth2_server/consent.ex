@@ -77,9 +77,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.Consent do
     conn = Plug.Parsers.call(conn, @parser_opts)
     server = server!(opts)
 
-    case request_params(conn, server) do
-      {:ok, params} ->
-        prepare_request(conn, server, params)
+    # Without the authorization code grant there is no authorization
+    # endpoint (the metadata document omits it), so the route is not there.
+    with true <- server.grant_supported?(:authorization_code),
+         {:ok, params} <- request_params(conn, server) do
+      prepare_request(conn, server, params)
+    else
+      false ->
+        {:halt, conn |> send_resp(404, "") |> halt()}
 
       {:error, :state_too_large} ->
         {:halt, bad_state_html(conn)}

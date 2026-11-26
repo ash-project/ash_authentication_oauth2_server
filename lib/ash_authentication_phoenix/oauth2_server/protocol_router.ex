@@ -14,7 +14,8 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
       document for each configured resource
     * `GET /openid-configuration`       — alias for OIDC-conformant tooling
     * `POST /register`                  — RFC 7591 Dynamic Client Registration
-    * `POST /token`                     — authorization_code + refresh_token grants
+    * `POST /token`                     — the grants in the server's
+                                         `:supported_grants`
     * `POST /revoke`                    — RFC 7009 token revocation
 
   Mount this behind your API pipeline (no CSRF, no session needed). For the
@@ -28,7 +29,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
 
   use Plug.Router, copy_opts_to_assign: :oauth2_server_router_opts
 
-  alias AshAuthentication.Oauth2Server.{Metadata, Register, Token}
+  alias AshAuthentication.Oauth2Server.{ClientAuth, Metadata, Register, Token}
   alias AshAuthentication.Phoenix.Oauth2Server.{BearerPlug, Errors}
 
   plug Plug.Parsers,
@@ -154,23 +155,32 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   # ── token ──────────────────────────────────────────────────────────────────
 
   post "/token" do
+    conn = fetch_query_params(conn)
     server = server!(conn.assigns.oauth2_server_router_opts)
-    params = conn.params || %{}
-    opts = client_request_opts(conn)
+    params = conn.params
 
     result =
-      case Map.get(params, "grant_type") do
-        "authorization_code" -> Token.exchange_authorization_code(server, params, opts)
-        "refresh_token" -> Token.exchange_refresh_token(server, params, opts)
-        type when type in [nil, ""] -> {:error, :invalid_request}
-        _ -> {:error, :unsupported_grant_type}
+      with :ok <- reject_credentials_in_query(conn),
+           {:ok, auth} <- ClientAuth.parse(conn, params) do
+        opts = [client_auth: auth] ++ tenant_opts(conn)
+
+        # Each grant checks that it is in the server's `:supported_grants`.
+        case Map.get(params, "grant_type") do
+          "authorization_code" -> Token.exchange_authorization_code(server, params, opts)
+          "refresh_token" -> Token.exchange_refresh_token(server, params, opts)
+          "client_credentials" -> Token.exchange_client_credentials(server, params, opts)
+          type when type in [nil, ""] -> {:error, :invalid_request}
+          _ -> {:error, :unsupported_grant_type}
+        end
       end
 
     case result do
       {:ok, response} ->
         conn
         |> put_resp_header("content-type", "application/json")
+        # RFC 6749 §5.1 — MUST send Cache-Control: no-store and Pragma: no-cache.
         |> put_resp_header("cache-control", "no-store")
+        |> put_resp_header("pragma", "no-cache")
         |> send_resp(200, Jason.encode!(token_response_json(response)))
         |> halt()
 
@@ -182,6 +192,20 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     end
   end
 
+  # RFC 6749 §2.3.1: client credentials MUST NOT be sent in the request URI.
+  # Reject them in the query even when a body is also present.
+  @token_credential_query_params ~w(
+    client_id client_secret client_assertion client_assertion_type
+  )
+
+  defp reject_credentials_in_query(conn) do
+    qp = conn.query_params
+
+    if Enum.any?(@token_credential_query_params, &Map.has_key?(qp, &1)),
+      do: {:error, :invalid_request},
+      else: :ok
+  end
+
   # ── revocation (RFC 7009) ──────────────────────────────────────────────────
 
   # RFC 7009 §2.2: an invalid token is a 200, like a revoked one. Only a bad
@@ -190,7 +214,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   post "/revoke" do
     server = server!(conn.assigns.oauth2_server_router_opts)
 
-    case Token.revoke(server, conn.params || %{}, client_request_opts(conn)) do
+    params = conn.params
+
+    result =
+      with {:ok, auth} <- ClientAuth.parse(conn, params) do
+        Token.revoke(server, params, [client_auth: auth] ++ tenant_opts(conn))
+      end
+
+    case result do
       :ok ->
         conn
         |> put_resp_header("cache-control", "no-store")
@@ -235,31 +266,24 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
     end
   end
 
-  defp client_request_opts(conn) do
-    [authorization_scheme: authorization_scheme(conn)] ++ tenant_opts(conn)
-  end
-
-  defp authorization_scheme(conn) do
-    case Plug.Conn.get_req_header(conn, "authorization") do
-      [header | _] -> header |> String.split(" ", parts: 2) |> hd() |> String.downcase()
-      [] -> nil
-    end
-  end
-
-  # OAuth 2.1 §3.2.4: when a client attempted authentication with the
-  # Authorization header, `invalid_client` MUST be a 401 with a challenge
-  # for the scheme the client used. RFC 7617 §2 requires `realm` in a Basic
-  # challenge.
+  # RFC 6749 §5.2: when the client attempted authentication with the
+  # `Authorization` header, `invalid_client` MUST be a 401 with a
+  # `WWW-Authenticate` challenge. HTTP Basic is the one header scheme this
+  # server supports, and RFC 7617 §2 requires `realm` in its challenge.
   defp send_token_error(conn, server, reason) do
-    case {Errors.describe_token_error(reason), authorization_scheme(conn)} do
-      {{_status, "invalid_client" = code, desc}, "basic"} ->
-        realm = server.issuer_url(secret_context(conn))
+    case Errors.describe_token_error(reason) do
+      {_status, "invalid_client" = code, desc} ->
+        if get_req_header(conn, "authorization") == [] do
+          Errors.send_oauth_error(conn, 400, code, desc)
+        else
+          realm = server.issuer_url(secret_context(conn))
 
-        conn
-        |> put_resp_header("www-authenticate", ~s|Basic realm="#{realm}"|)
-        |> Errors.send_oauth_error(401, code, desc)
+          conn
+          |> put_resp_header("www-authenticate", ~s|Basic realm="#{realm}"|)
+          |> Errors.send_oauth_error(401, code, desc)
+        end
 
-      {{status, code, desc}, _scheme} ->
+      {status, code, desc} ->
         Errors.send_oauth_error(conn, status, code, desc)
     end
   end
@@ -310,16 +334,16 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ProtocolRouter do
   end
 
   defp token_response_json(%{} = response) do
-    %{
+    base = %{
       "access_token" => response.access_token,
       "token_type" => response.token_type,
       "expires_in" => response.expires_in,
       "scope" => response.scope
     }
-    |> then(fn json ->
-      if response.refresh_token,
-        do: Map.put(json, "refresh_token", response.refresh_token),
-        else: json
-    end)
+
+    case Map.get(response, :refresh_token) do
+      nil -> base
+      token -> Map.put(base, "refresh_token", token)
+    end
   end
 end

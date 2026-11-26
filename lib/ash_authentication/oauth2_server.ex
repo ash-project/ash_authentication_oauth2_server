@@ -49,6 +49,31 @@ defmodule AshAuthentication.Oauth2Server do
   | `:cimd_fetch_options` | `[]` | Keyword options passed to the fetcher's `fetch/2` — see `AshAuthentication.Oauth2Server.CIMD.ReqFetcher` for the default fetcher's options. |
   | `:sign_in_path` | `nil` | Path to redirect unauthenticated `/oauth/authorize` requests to. When `nil`, returns 401. |
   | `:initial_access_token` | `nil` | When set, `POST /oauth/register` requires the request to present a matching `Authorization: Bearer …` token (RFC 7591 §3). When `nil` (default), dynamic client registration is open — see the trust-model note below. |
+  | `:supported_grants` | `[:authorization_code, :refresh_token]` | The grant types the token endpoint accepts and the metadata document advertises (RFC 8414 `grant_types_supported`). Add `:client_credentials` to issue tokens to confidential clients without a user (RFC 6749 §4.4). `:refresh_token` requires `:authorization_code`, and so do `:dcr_enabled?` and `:cimd_enabled?`. See the grants section below. |
+  | `:verify_client_secret` | `{AshAuthentication.Oauth2Server.ClientSecret, :verify, []}` | MFA `{Mod, :fun, args}` or 2-arity fun `(client, secret) -> boolean` that checks the secret a confidential client presents at the token endpoint. The default compares a SHA-256 digest with the client's `client_secret_hash` attribute, see `AshAuthentication.Oauth2Server.ClientSecret`. Override to verify against a KMS or another store. |
+  | `:extra_access_token_claims` | `nil` | Optional MFA `{Mod, :fun, args}` or 3-arity fun `(principal, claims, opts) -> map` whose result is merged into every minted access token (string keys). `principal` is the user id, or the client record for `client_credentials` tokens. Reserved claims are never overridden. |
+
+  ## Grants
+
+  `:supported_grants` lists the grant types of this server. Each entry
+  switches on a part of the protocol:
+
+    * `:authorization_code` serves `/oauth/authorize` and the
+      `authorization_code` grant at `/oauth/token`. Without it the consent
+      router answers 404, and the metadata document has no
+      `authorization_endpoint`. Dynamic client registration and Client ID
+      Metadata Documents register clients for this grant, so
+      `:dcr_enabled?` and `:cimd_enabled?` require it.
+    * `:refresh_token` issues a refresh token with each authorization code
+      exchange and serves the `refresh_token` grant. It requires
+      `:authorization_code`.
+    * `:client_credentials` serves the `client_credentials` grant for
+      confidential clients (RFC 6749 §4.4). See the client credentials
+      topic guide.
+
+  A `grant_type` outside the list fails with `unsupported_grant_type`
+  (RFC 6749 §5.2). A client may only use the grants in its own
+  `grant_types`; others fail with `unauthorized_client`.
 
   ## Protected resources
 
@@ -219,7 +244,10 @@ defmodule AshAuthentication.Oauth2Server do
       cimd_fetcher: AshAuthentication.Oauth2Server.CIMD.ReqFetcher,
       cimd_fetch_options: [],
       sign_in_path: nil,
-      initial_access_token: nil
+      initial_access_token: nil,
+      supported_grants: [:authorization_code, :refresh_token],
+      verify_client_secret: {AshAuthentication.Oauth2Server.ClientSecret, :verify, []},
+      extra_access_token_claims: nil
     ]
   end
 
@@ -345,6 +373,61 @@ defmodule AshAuthentication.Oauth2Server do
         end
       end
 
+      @doc """
+      The grant types this server supports, as configured with
+      `:supported_grants`.
+      """
+      def supported_grants, do: Keyword.fetch!(@oauth2_server_opts, :supported_grants)
+
+      @doc """
+      Whether a grant type is in `:supported_grants`. Accepts the atom or
+      the RFC 7591 string form (`"client_credentials"`).
+      """
+      def grant_supported?(grant) when is_atom(grant), do: grant in supported_grants()
+
+      def grant_supported?(grant) when is_binary(grant),
+        do: Enum.any?(supported_grants(), &(Atom.to_string(&1) == grant))
+
+      @doc """
+      Verify the secret a confidential client presented, with the
+      configured `:verify_client_secret`. Returns a boolean.
+      """
+      def verify_client_secret(client, secret) when is_binary(secret) do
+        case @oauth2_server_opts[:verify_client_secret] do
+          fun when is_function(fun, 2) ->
+            fun.(client, secret) == true
+
+          {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
+            apply(mod, fun, [client, secret | args]) == true
+        end
+      end
+
+      @doc """
+      Optional extra JWT claims for an access token.
+
+      `principal` is the user id (person grants) or the client record
+      (`client_credentials`). Returns a map of string keys to merge into
+      the token claims. Reserved protocol claims (`iss`, `sub`, `aud`,
+      `client_id`, `scope`, `iat`, `nbf`, `exp`, `jti`, `tenant`, `gty`)
+      are ignored if returned — only app-specific keys are kept.
+      """
+      def extra_access_token_claims(principal, claims, opts \\ []) do
+        case @oauth2_server_opts[:extra_access_token_claims] do
+          nil ->
+            %{}
+
+          fun when is_function(fun, 3) ->
+            fun.(principal, claims, opts) || %{}
+
+          {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
+            apply(mod, fun, [principal, claims, opts | args]) || %{}
+
+          other ->
+            raise ArgumentError,
+                  "invalid :extra_access_token_claims on #{inspect(__MODULE__)}: #{inspect(other)}"
+        end
+      end
+
       def __oauth2_server__, do: true
     end
   end
@@ -361,6 +444,8 @@ defmodule AshAuthentication.Oauth2Server do
     end
 
     validate_resources!(module, opts)
+    validate_supported_grants!(module, opts)
+    validate_verify_client_secret!(module, opts)
 
     case Keyword.fetch!(opts, :otp_app) do
       atom when is_atom(atom) ->
@@ -392,6 +477,64 @@ defmodule AshAuthentication.Oauth2Server do
     )
 
     :ok
+  end
+
+  @known_grants [:authorization_code, :refresh_token, :client_credentials]
+
+  defp validate_supported_grants!(module, opts) do
+    grants = Keyword.get(opts, :supported_grants, __default_opts__()[:supported_grants])
+
+    unless is_list(grants) and grants != [] and Enum.all?(grants, &(&1 in @known_grants)) do
+      raise CompileError,
+        description:
+          "#{inspect(module)}: `:supported_grants` must be a non-empty list drawn from " <>
+            "#{inspect(@known_grants)}, got: #{inspect(grants)}"
+    end
+
+    unless :authorization_code in grants do
+      cond do
+        :refresh_token in grants ->
+          raise CompileError,
+            description:
+              "#{inspect(module)}: `:refresh_token` in `:supported_grants` requires " <>
+                "`:authorization_code`, which issues the refresh tokens"
+
+        Keyword.get(opts, :dcr_enabled?, false) ->
+          raise CompileError,
+            description:
+              "#{inspect(module)}: `dcr_enabled?: true` requires `:authorization_code` in " <>
+                "`:supported_grants`. Dynamic client registration registers clients for " <>
+                "that grant."
+
+        Keyword.get(opts, :cimd_enabled?, false) ->
+          raise CompileError,
+            description:
+              "#{inspect(module)}: `cimd_enabled?: true` requires `:authorization_code` in " <>
+                "`:supported_grants`. Client ID Metadata Documents register clients for " <>
+                "that grant."
+
+        true ->
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp validate_verify_client_secret!(module, opts) do
+    case Keyword.get(opts, :verify_client_secret, __default_opts__()[:verify_client_secret]) do
+      fun when is_function(fun, 2) ->
+        :ok
+
+      {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
+        :ok
+
+      other ->
+        raise CompileError,
+          description:
+            "#{inspect(module)}: `:verify_client_secret` must be a 2-arity function or an " <>
+              "MFA tuple, got: #{inspect(other)}"
+    end
   end
 
   defp validate_resources!(module, opts) do

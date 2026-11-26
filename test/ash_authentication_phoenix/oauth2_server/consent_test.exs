@@ -53,6 +53,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentTest do
     defdelegate scopes(), to: TenantedServer
     defdelegate enforce_scopes?(), to: TenantedServer
     defdelegate cimd_enabled?(), to: TenantedServer
+    defdelegate grant_supported?(grant), to: TenantedServer
     defdelegate sign_in_path(), to: TenantedServer
 
     def issuer_url(%{tenant: tenant}), do: "https://#{tenant}.example.com"
@@ -67,6 +68,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentTest do
     defdelegate scopes(), to: Server
     defdelegate enforce_scopes?(), to: Server
     defdelegate cimd_enabled?(), to: Server
+    defdelegate grant_supported?(grant), to: Server
 
     def sign_in_path, do: "/sign-in"
   end
@@ -80,6 +82,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentTest do
     defdelegate scopes(), to: Server
     defdelegate enforce_scopes?(), to: Server
     defdelegate cimd_enabled?(), to: Server
+    defdelegate grant_supported?(grant), to: Server
     defdelegate sign_in_path(), to: Server
     defdelegate authorization_code_resource(), to: Server
     defdelegate authorization_code_lifetime(), to: Server
@@ -113,12 +116,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentTest do
 
     defdelegate cimd_fetch_options(), to: Server
     def cimd_enabled?, do: true
+    defdelegate grant_supported?(grant), to: Server
     def cimd_fetcher, do: RecordingCimdFetcher
   end
 
   defmodule VanishingClientServer do
     defdelegate client_resource(), to: Server
     defdelegate cimd_enabled?(), to: Server
+    defdelegate grant_supported?(grant), to: Server
     defdelegate enforce_scopes?(), to: Server
 
     def scopes do

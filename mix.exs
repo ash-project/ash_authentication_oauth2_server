@@ -79,7 +79,8 @@ defmodule AshAuthentication.Oauth2Server.MixProject do
         {"README.md", title: "Home"},
         "documentation/topics/scopes.md",
         "documentation/topics/client-id-metadata-documents.md",
-        "documentation/topics/custom-consent-flows.md"
+        "documentation/topics/custom-consent-flows.md",
+        "documentation/topics/client-credentials.md"
       ],
       groups_for_extras: [
         Topics: ~r'documentation/topics'
