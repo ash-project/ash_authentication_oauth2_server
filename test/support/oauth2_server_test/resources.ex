@@ -726,3 +726,34 @@ defmodule Oauth2ServerTest.TenantedServer do
     scopes: ["mcp"],
     dcr_enabled?: true
 end
+
+defmodule Oauth2ServerTest.TenantUrlSecrets do
+  @moduledoc false
+  use AshAuthentication.Secret
+
+  @impl AshAuthentication.Secret
+  def secret_for([:resource_url], _, _, %{tenant: tenant}),
+    do: {:ok, "https://app.example.com/#{tenant}/mcp"}
+
+  def secret_for(_, _, _, _), do: :error
+end
+
+defmodule Oauth2ServerTest.TenantUrlServer do
+  @moduledoc """
+  Server pointed at the tenant-aware resources, so multitenancy tests
+  can exercise tenant threading through every protocol path.
+  """
+
+  use AshAuthentication.Oauth2Server,
+    otp_app: :ash_authentication_oauth2_server,
+    user_resource: Oauth2ServerTest.TenantedUser,
+    issuer_url: {Oauth2ServerTest.Secrets, []},
+    resource_url: {Oauth2ServerTest.TenantUrlSecrets, []},
+    signing_secret: {Oauth2ServerTest.Secrets, []},
+    client_resource: Oauth2ServerTest.TenantedOAuthClient,
+    authorization_code_resource: Oauth2ServerTest.TenantedOAuthAuthorizationCode,
+    refresh_token_resource: Oauth2ServerTest.TenantedOAuthRefreshToken,
+    consent_resource: Oauth2ServerTest.TenantedOAuthConsent,
+    scopes: ["mcp"],
+    dcr_enabled?: true
+end

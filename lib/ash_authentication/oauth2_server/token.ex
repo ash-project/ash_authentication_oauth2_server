@@ -278,7 +278,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
   refresh usable" check lives in the `:rotate` action's filter, so
   validate + rotate is one query in the happy path. On a 0-row result
   (race lost, invalid token, expired, etc.) we do a follow-up read to
-  distinguish `:reuse` from the other failure modes.
+  distinguish `:reuse` from the other failure modes. Opt-in tenant recovery
+  adds a preliminary lookup when the caller has not supplied a tenant.
   """
   @spec exchange_refresh_token(server :: module(), params :: map(), opts()) ::
           {:ok, token_response()} | {:error, atom()}
@@ -297,6 +298,26 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts) do
     hash = hash_refresh(raw)
+
+    with {:ok, opts} <- recover_refresh_tenant(server, hash, client_id, opts) do
+      rotate_refresh_token(server, params, hash, presented_client_id, client_id, opts)
+    end
+  end
+
+  # This preliminary read only establishes the tenant for resource resolution.
+  # The atomic rotation still validates the grant and decides which request wins.
+  defp recover_refresh_tenant(server, hash, client_id, opts) do
+    if Keyword.get(opts, :recover_tenant_from_grant?, false) == true and is_nil(opts[:tenant]) do
+      with {:ok, row} <- find_refresh(server, hash, opts),
+           :ok <- check_client_match(row, client_id) do
+        {:ok, recover_grant_tenant(opts, server.refresh_token_resource(), row)}
+      end
+    else
+      {:ok, opts}
+    end
+  end
+
+  defp rotate_refresh_token(server, params, hash, presented_client_id, client_id, opts) do
     resource = Map.get(params, "resource")
     resource_urls = resource_urls(server, secret_context(Keyword.get(opts, :tenant)))
 
@@ -385,7 +406,6 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # the scope of the grant (RFC 6749 §6).
   defp complete_rotation(server, old_row, scope, presented_client_id, new_refresh, opts) do
     {new_id, new_hash, new_raw} = new_refresh
-    opts = recover_grant_tenant(opts, server.refresh_token_resource(), old_row)
     tenant = Keyword.get(opts, :tenant)
     access_scope = scope || old_row.scope
 

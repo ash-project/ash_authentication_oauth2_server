@@ -324,6 +324,65 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
       end
     end
 
+    test "recovers the refresh tenant before resolving tenant-dependent resource URLs", %{
+      user_a: user_a
+    } do
+      server = Oauth2ServerTest.TenantUrlServer
+      client = register_client(@tenant_a)
+      redirect_uri = "https://chat.example.com/cb"
+      {verifier, challenge} = pkce_pair()
+      resource = server.resource_url(%{tenant: @tenant_a})
+      params = authorize_params(client, challenge, redirect_uri) |> Map.put("resource", resource)
+      {:ok, validated} = Authorize.validate_request(server, params, tenant: @tenant_a)
+      code = Authorize.issue_code!(server, user_a, validated, tenant: @tenant_a)
+
+      {:ok, %{refresh_token: refresh}} =
+        Token.exchange_authorization_code(
+          server,
+          %{
+            "code" => code.id,
+            "client_id" => client.id,
+            "redirect_uri" => redirect_uri,
+            "code_verifier" => verifier
+          },
+          recover_tenant_from_grant?: true
+        )
+
+      refresh_params = %{
+        "refresh_token" => refresh,
+        "client_id" => client.id,
+        "resource" => resource
+      }
+
+      assert {:error, :invalid_target} =
+               Token.exchange_refresh_token(
+                 server,
+                 Map.put(refresh_params, "resource", server.resource_url(%{tenant: @tenant_b})),
+                 recover_tenant_from_grant?: true
+               )
+
+      assert {:ok, response} =
+               Token.exchange_refresh_token(server, refresh_params,
+                 recover_tenant_from_grant?: true
+               )
+
+      assert {:ok, claims} = Jwt.verify(server, response.access_token)
+      assert claims["tenant"] == @tenant_a
+
+      # Reuse detection must still revoke the chain after the preliminary lookup.
+      assert {:error, :reuse} =
+               Token.exchange_refresh_token(server, refresh_params,
+                 recover_tenant_from_grant?: true
+               )
+
+      assert {:error, _} =
+               Token.exchange_refresh_token(
+                 server,
+                 Map.put(refresh_params, "refresh_token", response.refresh_token),
+                 recover_tenant_from_grant?: true
+               )
+    end
+
     for recovery? <- [nil, false, true] do
       @recovery? recovery?
       test "refresh tenant recovery is opt-in (#{inspect(recovery?)})",
