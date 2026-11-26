@@ -45,12 +45,20 @@ defmodule AshAuthentication.Oauth2Server.Token do
   Options shared across this module's public functions.
 
     * `:tenant` — the Ash tenant.
+    * `:recover_tenant_from_grant?` — recover a missing tenant from the grant
+      resource's multitenancy attribute. Defaults to `false`. Grant resources must
+      support lookup without a tenant (for example, with `global? true`).
+      Context-based multitenancy is not supported.
     * `:authorization_scheme` — the scheme of the request's `Authorization`
       header, downcased (for example `"basic"`), or `nil` without one. The
       server supports public clients only, so any client credentials make
       the request fail (OAuth 2.1 §3.2.2).
   """
-  @type opts :: [tenant: any(), authorization_scheme: String.t() | nil]
+  @type opts :: [
+          tenant: any(),
+          recover_tenant_from_grant?: boolean(),
+          authorization_scheme: String.t() | nil
+        ]
 
   # ── authorization_code grant ───────────────────────────────────────────────
 
@@ -63,14 +71,14 @@ defmodule AshAuthentication.Oauth2Server.Token do
           {:ok, token_response()}
           | {:error, atom()}
   def exchange_authorization_code(server, params, opts \\ []) do
-    tenant = Keyword.get(opts, :tenant)
-    secret_context = secret_context(tenant)
-
     with :ok <- check_no_client_credentials(params, opts),
          :ok <- require_params(params, ["client_id", "code", "code_verifier"]),
          {:ok, presented_client_id, client} <- resolve_client_id(server, params, opts),
          :ok <- check_grant_type(client, "authorization_code"),
          {:ok, code} <- load_code(server, params, client.id, opts),
+         opts = recover_grant_tenant(opts, server.authorization_code_resource(), code),
+         tenant = Keyword.get(opts, :tenant),
+         secret_context = secret_context(tenant),
          :ok <- verify_pkce(code, params),
          :ok <- check_redirect_match(params, code),
          :ok <- check_resource_match(server, params, code, secret_context),
@@ -270,7 +278,8 @@ defmodule AshAuthentication.Oauth2Server.Token do
   refresh usable" check lives in the `:rotate` action's filter, so
   validate + rotate is one query in the happy path. On a 0-row result
   (race lost, invalid token, expired, etc.) we do a follow-up read to
-  distinguish `:reuse` from the other failure modes.
+  distinguish `:reuse` from the other failure modes. Opt-in tenant recovery
+  adds a preliminary lookup when the caller has not supplied a tenant.
   """
   @spec exchange_refresh_token(server :: module(), params :: map(), opts()) ::
           {:ok, token_response()} | {:error, atom()}
@@ -289,6 +298,26 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp do_exchange_refresh_token(server, params, raw, presented_client_id, client_id, opts) do
     hash = hash_refresh(raw)
+
+    with {:ok, opts} <- recover_refresh_tenant(server, hash, client_id, opts) do
+      rotate_refresh_token(server, params, hash, presented_client_id, client_id, opts)
+    end
+  end
+
+  # This preliminary read only establishes the tenant for resource resolution.
+  # The atomic rotation still validates the grant and decides which request wins.
+  defp recover_refresh_tenant(server, hash, client_id, opts) do
+    if Keyword.get(opts, :recover_tenant_from_grant?, false) == true and is_nil(opts[:tenant]) do
+      with {:ok, row} <- find_refresh(server, hash, opts),
+           :ok <- check_client_match(row, client_id) do
+        {:ok, recover_grant_tenant(opts, server.refresh_token_resource(), row)}
+      end
+    else
+      {:ok, opts}
+    end
+  end
+
+  defp rotate_refresh_token(server, params, hash, presented_client_id, client_id, opts) do
     resource = Map.get(params, "resource")
     resource_urls = resource_urls(server, secret_context(Keyword.get(opts, :tenant)))
 
@@ -644,6 +673,32 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   # ── opts helper ───────────────────────────────────────────────────────────
+
+  # Recover the tenant from the grant when explicitly enabled and the caller
+  # has not supplied one.
+  #
+  # `/token` is reached with no session and no browser context.
+  # An app whose tenant lives in a subdomain or a header can set it upstream
+  # and this is a no-op; an app whose tenants share one host has nothing to
+  # derive it from, and the request carries only an opaque code or refresh
+  # token. The row behind that credential is the authority anyway — it was
+  # written under the tenant the user consented in — so read it from there.
+  #
+  # Without this, such an app mints a token with no `tenant` claim and then
+  # fails outright on the refresh row, whose tenant attribute cannot be null.
+  # Only attribute-based multitenancy can be recovered this way; `:context`
+  # strategies have no attribute to read, and are left to the caller.
+  defp recover_grant_tenant(opts, resource, record) do
+    with true <- Keyword.get(opts, :recover_tenant_from_grant?, false),
+         nil <- opts[:tenant],
+         tenant_attribute when not is_nil(tenant_attribute) <-
+           Ash.Resource.Info.multitenancy_attribute(resource),
+         tenant when not is_nil(tenant) <- Map.get(record, tenant_attribute) do
+      Keyword.put(opts, :tenant, tenant)
+    else
+      _ -> opts
+    end
+  end
 
   # Bypass context + tenant (when provided). Used for every Ash call in
   # this module.
