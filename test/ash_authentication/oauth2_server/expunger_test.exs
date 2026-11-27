@@ -10,6 +10,7 @@ defmodule AshAuthentication.Oauth2Server.ExpungerTest do
   use ExUnit.Case, async: false
 
   alias AshAuthentication.Oauth2Server.{
+    Authorize,
     AuthorizationCodeResource,
     ClientResource,
     RefreshTokenResource
@@ -228,6 +229,7 @@ defmodule AshAuthentication.Oauth2Server.ExpungerTest do
   defp create_code!(overrides) do
     defaults = %{
       id: Ash.UUIDv7.generate(),
+      code_hash: Authorize.hash_code("code_#{Ash.UUID.generate()}"),
       client_id: Ash.UUIDv7.generate(),
       user_id: Ash.UUIDv7.generate(),
       redirect_uri: "https://x.example.com/cb",

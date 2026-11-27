@@ -89,6 +89,7 @@ defmodule Oauth2ServerTest.OAuthAuthorizationCode do
 
   attributes do
     uuid_v7_primary_key :id
+    attribute :code_hash, :string, allow_nil?: false, public?: true
     attribute :client_id, :uuid_v7, allow_nil?: false, public?: true
     attribute :user_id, :uuid_v7, allow_nil?: false, public?: true
     attribute :redirect_uri, :string, allow_nil?: false, public?: true
@@ -104,6 +105,7 @@ defmodule Oauth2ServerTest.OAuthAuthorizationCode do
 
     create :create do
       accept [
+        :code_hash,
         :client_id,
         :user_id,
         :redirect_uri,
@@ -114,8 +116,14 @@ defmodule Oauth2ServerTest.OAuthAuthorizationCode do
       ]
     end
 
+    # `require_atomic? false` is necessary on `:consume` only because the
+    # ETS-backed test identity uses `pre_check_with:`, which attaches a
+    # `:before_action` hook that's incompatible with atomic execution.
+    # Production-generated resources (Postgres) don't use `pre_check_with`,
+    # so the install task generates these actions without this opt-out.
     update :consume do
       accept []
+      require_atomic? false
 
       validate absent(:consumed_at) do
         message "code already used"
@@ -123,6 +131,10 @@ defmodule Oauth2ServerTest.OAuthAuthorizationCode do
 
       change atomic_update(:consumed_at, expr(now()))
     end
+  end
+
+  identities do
+    identity :by_code_hash, [:code_hash], pre_check_with: Oauth2ServerTest.Domain
   end
 end
 
@@ -549,6 +561,7 @@ defmodule Oauth2ServerTest.TenantedOAuthAuthorizationCode do
   attributes do
     uuid_v7_primary_key :id
     attribute :org_id, :string, public?: true, allow_nil?: false
+    attribute :code_hash, :string, allow_nil?: false, public?: true
     attribute :client_id, :uuid_v7, allow_nil?: false, public?: true
     attribute :user_id, :uuid_v7, allow_nil?: false, public?: true
     attribute :redirect_uri, :string, allow_nil?: false, public?: true
@@ -564,6 +577,7 @@ defmodule Oauth2ServerTest.TenantedOAuthAuthorizationCode do
 
     create :create do
       accept [
+        :code_hash,
         :client_id,
         :user_id,
         :redirect_uri,
@@ -574,8 +588,14 @@ defmodule Oauth2ServerTest.TenantedOAuthAuthorizationCode do
       ]
     end
 
+    # `require_atomic? false` is necessary on `:consume` only because the
+    # ETS-backed test identity uses `pre_check_with:`, which attaches a
+    # `:before_action` hook that's incompatible with atomic execution.
+    # Production-generated resources (Postgres) don't use `pre_check_with`,
+    # so the install task generates these actions without this opt-out.
     update :consume do
       accept []
+      require_atomic? false
 
       validate absent(:consumed_at) do
         message "code already used"
@@ -583,6 +603,10 @@ defmodule Oauth2ServerTest.TenantedOAuthAuthorizationCode do
 
       change atomic_update(:consumed_at, expr(now()))
     end
+  end
+
+  identities do
+    identity :by_code_hash, [:code_hash], pre_check_with: Oauth2ServerTest.TenantedDomain
   end
 end
 

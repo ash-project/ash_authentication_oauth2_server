@@ -125,7 +125,7 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
                Token.exchange_authorization_code(
                  TenantedServer,
                  %{
-                   "code" => code.id,
+                   "code" => Authorize.get_raw_code(code),
                    "client_id" => client.id,
                    "redirect_uri" => redirect_uri,
                    "code_verifier" => verifier
@@ -163,7 +163,7 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
                Token.exchange_authorization_code(
                  TenantedServer,
                  %{
-                   "code" => code.id,
+                   "code" => Authorize.get_raw_code(code),
                    "client_id" => client.id,
                    "redirect_uri" => redirect_uri,
                    "code_verifier" => verifier
@@ -176,7 +176,7 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
                Token.exchange_authorization_code(
                  TenantedServer,
                  %{
-                   "code" => code.id,
+                   "code" => Authorize.get_raw_code(code),
                    "client_id" => client.id,
                    "redirect_uri" => redirect_uri,
                    "code_verifier" => verifier
@@ -203,7 +203,7 @@ defmodule AshAuthentication.Oauth2Server.MultitenancyTest do
         Token.exchange_authorization_code(
           TenantedServer,
           %{
-            "code" => code.id,
+            "code" => Authorize.get_raw_code(code),
             "client_id" => client.id,
             "redirect_uri" => redirect_uri,
             "code_verifier" => verifier

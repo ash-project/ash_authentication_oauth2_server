@@ -491,15 +491,27 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
 
       {:ok, validated} = Authorize.validate_request(Server, auth_params)
       code_record = Authorize.issue_code!(Server, user, validated)
+      raw_code = Authorize.get_raw_code(code_record)
+
+      assert is_binary(raw_code)
+      assert code_record.id != raw_code
+      assert code_record.code_hash == Authorize.hash_code(raw_code)
 
       token_params = %{
         "grant_type" => "authorization_code",
-        "code" => code_record.id,
+        "code" => raw_code,
         "redirect_uri" => "https://chat.example.com/cb",
         "code_verifier" => verifier,
         "client_id" => client.id,
         "resource" => Server.resource_url()
       }
+
+      # Presenting the database record ID instead of raw code is rejected
+      assert {:error, :invalid_code} =
+               Token.exchange_authorization_code(
+                 Server,
+                 %{token_params | "code" => code_record.id}
+               )
 
       assert {:ok, response} = Token.exchange_authorization_code(Server, token_params)
       assert response.token_type == "Bearer"
@@ -530,7 +542,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
 
       params = %{
         "grant_type" => "authorization_code",
-        "code" => code.id,
+        "code" => Authorize.get_raw_code(code),
         "redirect_uri" => "https://chat.example.com/cb",
         "code_verifier" => verifier,
         "client_id" => client.id,
@@ -556,7 +568,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:error, :pkce} =
                Token.exchange_authorization_code(Server, %{
                  "grant_type" => "authorization_code",
-                 "code" => code.id,
+                 "code" => Authorize.get_raw_code(code),
                  "redirect_uri" => "https://chat.example.com/cb",
                  "code_verifier" => "wrong",
                  "client_id" => client.id,
@@ -579,7 +591,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:error, :redirect_mismatch} =
                Token.exchange_authorization_code(Server, %{
                  "grant_type" => "authorization_code",
-                 "code" => code.id,
+                 "code" => Authorize.get_raw_code(code),
                  "redirect_uri" => "https://other.example.com/cb",
                  "code_verifier" => verifier,
                  "client_id" => client.id,
@@ -606,7 +618,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:error, :redirect_mismatch} =
                Token.exchange_authorization_code(Server, %{
                  "grant_type" => "authorization_code",
-                 "code" => code.id,
+                 "code" => Authorize.get_raw_code(code),
                  "redirect_uri" => "HTTPS://CHAT.EXAMPLE.COM:443/cb/",
                  "code_verifier" => verifier,
                  "client_id" => client.id,
@@ -630,7 +642,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:error, :invalid_target} =
                Token.exchange_authorization_code(Server, %{
                  "grant_type" => "authorization_code",
-                 "code" => code.id,
+                 "code" => Authorize.get_raw_code(code),
                  "redirect_uri" => "https://chat.example.com/cb",
                  "code_verifier" => verifier,
                  "client_id" => client.id,
@@ -653,7 +665,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
 
       params = %{
         "grant_type" => "authorization_code",
-        "code" => code.id,
+        "code" => Authorize.get_raw_code(code),
         "redirect_uri" => "https://chat.example.com/cb",
         "client_id" => client.id
       }
@@ -685,7 +697,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:ok, _} =
                Token.exchange_authorization_code(Server, %{
                  "grant_type" => "authorization_code",
-                 "code" => code.id,
+                 "code" => Authorize.get_raw_code(code),
                  "code_verifier" => verifier,
                  "client_id" => client.id
                })
@@ -723,7 +735,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
 
       params = %{
         "grant_type" => "authorization_code",
-        "code" => code.id,
+        "code" => Authorize.get_raw_code(code),
         "code_verifier" => verifier,
         "client_id" => client.id
       }
@@ -767,7 +779,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       {:ok, first} =
         Token.exchange_authorization_code(Server, %{
           "grant_type" => "authorization_code",
-          "code" => code.id,
+          "code" => Authorize.get_raw_code(code),
           "redirect_uri" => "https://chat.example.com/cb",
           "code_verifier" => verifier,
           "client_id" => client.id,
@@ -814,7 +826,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       {:ok, first} =
         Token.exchange_authorization_code(Server, %{
           "grant_type" => "authorization_code",
-          "code" => code.id,
+          "code" => Authorize.get_raw_code(code),
           "redirect_uri" => "https://chat.example.com/cb",
           "code_verifier" => verifier,
           "client_id" => client.id,
@@ -883,7 +895,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       {:ok, first} =
         Token.exchange_authorization_code(Server, %{
           "grant_type" => "authorization_code",
-          "code" => code.id,
+          "code" => Authorize.get_raw_code(code),
           "redirect_uri" => "https://chat.example.com/cb",
           "code_verifier" => verifier,
           "client_id" => client.id,
@@ -936,7 +948,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       {:ok, first} =
         Token.exchange_authorization_code(Server, %{
           "grant_type" => "authorization_code",
-          "code" => code.id,
+          "code" => Authorize.get_raw_code(code),
           "code_verifier" => verifier,
           "client_id" => client.id
         })
@@ -989,7 +1001,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       {:ok, first} =
         Token.exchange_authorization_code(server, %{
           "grant_type" => "authorization_code",
-          "code" => code.id,
+          "code" => Authorize.get_raw_code(code),
           "code_verifier" => verifier,
           "client_id" => client.id
         })
@@ -1045,7 +1057,7 @@ defmodule AshAuthentication.Oauth2Server.FlowTest do
       assert {:ok, %{refresh_token: nil, access_token: access_token}} =
                Token.exchange_authorization_code(Server, %{
                  "grant_type" => "authorization_code",
-                 "code" => code.id,
+                 "code" => Authorize.get_raw_code(code),
                  "code_verifier" => verifier,
                  "client_id" => client.id
                })

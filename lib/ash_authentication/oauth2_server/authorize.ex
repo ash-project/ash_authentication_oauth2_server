@@ -226,6 +226,11 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   @doc """
   Mint a new short-lived authorization code bound to the user, client, scope,
   PKCE challenge, and resource URI.
+
+  The raw authorization code is attached to the returned record's metadata under
+  the `:code` key (and can be extracted with `get_raw_code/1`). The underlying
+  database record stores only the SHA-256 `code_hash`, keeping the raw secret
+  out of persistent storage.
   """
   @spec issue_code!(
           server :: module(),
@@ -234,6 +239,8 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
           opts()
         ) :: Ash.Resource.Record.t()
   def issue_code!(server, user, validated, opts \\ []) do
+    {raw, hash} = generate_code()
+
     expires_at =
       DateTime.add(DateTime.utc_now(), server.authorization_code_lifetime(), :second)
 
@@ -245,9 +252,33 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
       code_challenge: validated.code_challenge,
       scope: validated.scope,
       resource_uri: validated.resource,
-      expires_at: expires_at
+      expires_at: expires_at,
+      code_hash: hash
     })
     |> Ash.create!(ash_opts(opts))
+    |> Ash.Resource.put_metadata(:code, raw)
+  end
+
+  @doc """
+  Retrieve the raw (unhashed) authorization code from a freshly issued record's metadata.
+  """
+  @spec get_raw_code(Ash.Resource.Record.t()) :: String.t() | nil
+  def get_raw_code(record) do
+    Ash.Resource.get_metadata(record, :code)
+  end
+
+  @doc """
+  Compute the SHA-256 hex digest of a raw authorization code.
+  """
+  @spec hash_code(raw :: String.t()) :: String.t()
+  def hash_code(raw) when is_binary(raw) do
+    :crypto.hash(:sha256, raw) |> Base.encode16(case: :lower)
+  end
+
+  defp generate_code do
+    raw = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
+    hash = hash_code(raw)
+    {raw, hash}
   end
 
   # ── helpers ──────────────────────────────────────────────────────────────

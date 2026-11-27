@@ -18,6 +18,7 @@ defmodule AshAuthentication.Oauth2Server.AuthorizationCodeResource.Verifier do
   # Required by the Authorize/Token cores. `user_id` is checked
   # separately because its type matches the host app's `User.id`.
   @required_attributes [
+    {:code_hash, [Ash.Type.String, :string], allow_nil?: false},
     {:client_id, [Ash.Type.UUIDv7, :uuid_v7], allow_nil?: false},
     {:redirect_uri, [Ash.Type.String, :string], allow_nil?: false},
     {:code_challenge, [Ash.Type.String, :string], allow_nil?: false},

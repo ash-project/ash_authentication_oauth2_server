@@ -235,7 +235,10 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       assert String.starts_with?(location, redirect_uri <> "?")
       query = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
       assert {:ok, [code]} = Ash.read(OAuthAuthorizationCode)
-      assert query == %{"code" => code.id, "state" => "csrf-state", "iss" => Server.issuer_url()}
+      assert query["state"] == "csrf-state"
+      assert query["iss"] == Server.issuer_url()
+      assert query["code"] != code.id
+      assert code.code_hash == Authorize.hash_code(query["code"])
       assert code.client_id == client_id
       assert code.user_id == user.id
       assert code.code_challenge == challenge
@@ -814,15 +817,13 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
           |> Ash.read!(context: %{private: %{ash_authentication?: true}})
 
         assert conn.status == 302
-
-        assert get_resp_header(conn, "location") == [
-                 prefix <>
-                   URI.encode_query(%{
-                     "code" => code.id,
-                     "iss" => Server.issuer_url(),
-                     "state" => "csrf-state"
-                   })
-               ]
+        [location] = get_resp_header(conn, "location")
+        assert String.starts_with?(location, prefix)
+        query = location |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+        assert query["iss"] == Server.issuer_url()
+        assert query["state"] == "csrf-state"
+        assert query["code"] != code.id
+        assert code.code_hash == Authorize.hash_code(query["code"])
       end
     end
 
@@ -1043,7 +1044,7 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.RouterTest do
       {:ok, tokens} =
         Token.exchange_authorization_code(Server, %{
           "grant_type" => "authorization_code",
-          "code" => code.id,
+          "code" => Authorize.get_raw_code(code),
           "code_verifier" => verifier,
           "client_id" => client_id
         })
